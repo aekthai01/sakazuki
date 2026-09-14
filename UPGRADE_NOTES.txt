@@ -1,0 +1,39 @@
+Sakazuki maintenance upgrade - 2026-09-12
+
+Changed files:
+- public_html/automation_runner.php
+- public_html/includes/functions.php
+- public_html/includes/binance.php
+- public_html/includes/binance_giftcard.php
+
+What changed:
+1) Maintenance-only self-heal for legacy history.id schema.
+   - Detects missing PRIMARY KEY / AUTO_INCREMENT.
+   - Recognizes the known legacy all-zero ID pattern.
+   - Refuses unsafe automatic repair when foreign keys or an unexpected identity layout exist.
+   - Creates history_backup_identity_v2 before destructive ID repair.
+   - Verifies the result with a real INSERT + DELETE probe.
+2) Maintenance JSON now includes detailed schema/history diagnostics and safe job messages/counters.
+3) checkout_health.history_ready now validates history.id PRIMARY KEY + AUTO_INCREMENT instead of prepare() only.
+4) logHistory() now logs MySQL execute errno/error without logging customer details.
+5) Binance Gift Card and Binance TRC20 financial commits no longer roll back merely because secondary history audit logging fails.
+6) The one-minute critical/stock job set, intervals, and schema-migration guard were not changed.
+
+Important:
+- Scheduler token storage/authentication was not changed. Existing SHA-256 validation + AES-256-GCM encrypted admin copy remains in place, avoiding any risk to the configured 1-minute critical cron URL.
+
+Expected first maintenance run on an affected site:
+- history_schema.changed = true
+- history_schema.success = true
+- history_schema.before.data_stats may show all id=0
+- history_schema.after.id_primary = true
+- history_schema.after.id_auto_increment = true
+- history_schema.probe_cleaned = true
+- checkout_health.history_ready = true
+
+Expected later maintenance runs:
+- history_schema.success = true
+- history_schema.skipped = true
+- message = History audit schema already ready
+
+A backup table named history_backup_identity_v2 is intentionally retained after a successful legacy repair.

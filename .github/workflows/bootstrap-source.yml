@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - 'bootstrap/blackup-v3-source.part*'
+      - 'bootstrap/READY'
 
 permissions:
   contents: write
@@ -23,14 +23,14 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          parts=(bootstrap/blackup-v3-source.part*)
+          parts=(bootstrap/blackup-v3-source.b64part*)
           if [ "${#parts[@]}" -eq 0 ]; then
             echo "No bootstrap parts found; nothing to import."
-            exit 0
+            exit 1
           fi
-          cat "${parts[@]}" > /tmp/blackup-v3-source.tar.xz
+          cat "${parts[@]}" | base64 --decode > /tmp/blackup-v3-source.tar.xz
           tar -xJf /tmp/blackup-v3-source.tar.xz -C .
-          rm -f bootstrap/blackup-v3-source.part*
+          rm -f bootstrap/blackup-v3-source.b64part* bootstrap/READY
           rmdir bootstrap 2>/dev/null || true
 
           git config user.name "github-actions[bot]"

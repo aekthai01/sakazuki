@@ -1,0 +1,155 @@
+html.sakazuki-shell-child .sz-music{display:none!important}
+.sz-music{
+  position:fixed;
+  right:max(12px,env(safe-area-inset-right,0px));
+  top:clamp(120px,48dvh,calc(100dvh - 120px));
+  bottom:auto;
+  z-index:58;
+  display:flex;
+  align-items:flex-end;
+  gap:8px;
+  font-family:inherit;
+  pointer-events:none;
+  transform:translateY(-50%);
+}
+.sz-music *{box-sizing:border-box}
+.sz-music button,.sz-music input{pointer-events:auto}
+.sz-music-fab-wrap{
+  display:flex;
+  align-items:stretch;
+  overflow:hidden;
+  border:1px solid rgba(255,255,255,.13);
+  border-radius:16px;
+  background:rgba(14,16,23,.86);
+  box-shadow:0 14px 34px rgba(0,0,0,.38),inset 0 1px 0 rgba(255,255,255,.05);
+  backdrop-filter:blur(18px);
+  -webkit-backdrop-filter:blur(18px);
+}
+.sz-music-fab{
+  position:relative;
+  border:0;
+  color:#fff;
+  background:transparent;
+  cursor:pointer;
+  transition:background .16s ease,transform .16s ease,color .16s ease;
+}
+.sz-music-fab:active{transform:scale(.94)}
+.sz-music-fab-main{
+  width:48px;
+  height:48px;
+  display:grid;
+  place-items:center;
+  font-size:20px;
+  color:#a78bfa;
+}
+.sz-music-fab-main:hover{background:rgba(139,92,246,.13)}
+.sz-music-fab-expand{
+  width:31px;
+  min-width:31px;
+  border-left:1px solid rgba(255,255,255,.09);
+  color:#aab0bd;
+  font-size:12px;
+}
+.sz-music-fab-expand:hover{background:rgba(255,255,255,.07);color:#fff}
+.sz-music.is-playing .sz-music-fab-main{color:#c4b5fd}
+.sz-music-pulse{
+  position:absolute;
+  inset:9px;
+  border-radius:999px;
+  border:1px solid rgba(167,139,250,.4);
+  opacity:0;
+}
+.sz-music.is-playing .sz-music-pulse{animation:szMusicPulse 1.8s ease-out infinite}
+@keyframes szMusicPulse{0%{transform:scale(.72);opacity:.65}80%,100%{transform:scale(1.45);opacity:0}}
+
+.sz-music-panel{
+  position:absolute;
+  right:calc(100% + 10px);
+  top:50%;
+  width:min(330px,calc(100vw - 120px));
+  max-height:min(610px,calc(100dvh - 24px));
+  overflow:auto;
+  overscroll-behavior:contain;
+  padding:13px;
+  border:1px solid rgba(255,255,255,.13);
+  border-radius:18px;
+  background:rgba(13,15,22,.94);
+  box-shadow:0 20px 48px rgba(0,0,0,.46),inset 0 1px 0 rgba(255,255,255,.05);
+  backdrop-filter:blur(20px);
+  -webkit-backdrop-filter:blur(20px);
+  opacity:0;
+  transform:translateY(-50%) translateX(8px) scale(.98);
+  visibility:hidden;
+  pointer-events:none;
+  transition:opacity .16s ease,transform .16s ease,visibility .16s ease;
+}
+.sz-music.is-expanded .sz-music-panel{
+  opacity:1;
+  transform:translateY(-50%) translateX(0) scale(1);
+  visibility:visible;
+  pointer-events:auto;
+}
+.sz-music-panel-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:10px}
+.sz-music-heading-wrap{min-width:0}
+.sz-music-eyebrow{display:block;color:#8b93a7;font-size:9px;font-weight:800;letter-spacing:.18em;margin-bottom:3px}
+.sz-music-title{color:#fff;font-size:14px;font-weight:700;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:245px}
+.sz-music-icon-btn{
+  width:31px;height:31px;display:grid;place-items:center;flex:0 0 auto;border:1px solid rgba(255,255,255,.09);border-radius:10px;background:rgba(255,255,255,.04);color:#cbd0da;cursor:pointer
+}
+.sz-music-icon-btn:hover{background:rgba(255,255,255,.08);color:#fff}
+
+.sz-music-video-wrap{
+  position:relative;
+  width:100%;
+  height:200px;
+  min-height:200px;
+  overflow:hidden;
+  border-radius:14px;
+  background:linear-gradient(145deg,rgba(139,92,246,.15),rgba(30,41,59,.5));
+  border:1px solid rgba(255,255,255,.08);
+}
+.sz-music-video,.sz-music-video iframe{width:100%!important;height:200px!important;min-width:200px!important;min-height:200px!important;border:0}
+.sz-music-video-placeholder{
+  position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:7px;color:#a8afbd;background:linear-gradient(145deg,rgba(139,92,246,.14),rgba(15,23,42,.88));font-size:12px;pointer-events:none;transition:opacity .18s ease
+}
+.sz-music-video-placeholder i{font-size:31px;color:#a78bfa}
+.sz-music.has-player .sz-music-video-placeholder{opacity:0;visibility:hidden}
+.sz-music-status{min-height:18px;margin:9px 2px 4px;color:#9aa2b2;font-size:11px;line-height:1.45;text-align:center}
+.sz-music-status.is-warning{color:#fbbf24}
+.sz-music-status.is-error{color:#fca5a5}
+
+.sz-music-controls{display:flex;align-items:center;justify-content:center;gap:12px;padding:4px 0 8px}
+.sz-music-control-btn{
+  width:42px;height:42px;display:grid;place-items:center;border:1px solid rgba(255,255,255,.1);border-radius:50%;background:rgba(255,255,255,.04);color:#e9eaf0;font-size:17px;cursor:pointer;transition:transform .14s ease,background .14s ease
+}
+.sz-music-control-btn:hover{background:rgba(255,255,255,.09)}
+.sz-music-control-btn:active{transform:scale(.92)}
+.sz-music-control-primary{width:50px;height:50px;background:rgba(139,92,246,.18);border-color:rgba(167,139,250,.32);color:#c4b5fd;font-size:23px}
+.sz-music-control-primary:hover{background:rgba(139,92,246,.26)}
+.sz-music-volume-row{display:grid;grid-template-columns:18px 1fr 38px;align-items:center;gap:7px;padding:7px 5px 1px;color:#aeb4c1;font-size:11px}
+.sz-music-volume-row input{width:100%;accent-color:#8b5cf6;cursor:pointer}
+.sz-music-volume-row span{text-align:right;font-variant-numeric:tabular-nums}
+
+.sz-music.is-loading .sz-music-fab-main i{animation:szMusicSpin .8s linear infinite}
+@keyframes szMusicSpin{to{transform:rotate(360deg)}}
+
+@media (max-width:640px){
+  .sz-music{
+    right:max(10px,env(safe-area-inset-right,0px));
+    top:clamp(116px,46dvh,calc(100dvh - 116px));
+  }
+  .sz-music-panel{
+    right:calc(100% + 8px);
+    width:min(280px,calc(100vw - 108px));
+    max-height:calc(100dvh - 20px);
+    padding:11px;
+    border-radius:16px;
+  }
+  .sz-music-video-wrap,.sz-music-video,.sz-music-video iframe{height:200px!important;min-height:200px!important}
+}
+@media (max-width:390px){
+  .sz-music-panel{width:calc(100vw - 104px)}
+}
+@media (prefers-reduced-motion:reduce){
+  .sz-music *{animation:none!important;transition:none!important}
+}

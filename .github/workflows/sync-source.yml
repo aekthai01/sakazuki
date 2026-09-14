@@ -23,15 +23,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          shopt -s nullglob
-          chunks=(.source-sync/chunk_*.txt)
-          if [ ${#chunks[@]} -eq 0 ]; then
-            echo 'No sync chunks found; nothing to do.'
-            exit 0
+
+          if [ -f .source-sync/payload.tar.xz ]; then
+            cp .source-sync/payload.tar.xz /tmp/source-sync.tar.xz
+          else
+            shopt -s nullglob
+            chunks=(.source-sync/chunk_*.txt)
+            if [ ${#chunks[@]} -eq 0 ]; then
+              echo 'No sync payload found; nothing to do.'
+              exit 0
+            fi
+            cat "${chunks[@]}" > /tmp/source-sync.b64
+            base64 --decode /tmp/source-sync.b64 > /tmp/source-sync.tar.xz
           fi
 
-          cat "${chunks[@]}" > /tmp/source-sync.b64
-          base64 --decode /tmp/source-sync.b64 > /tmp/source-sync.tar.xz
           tar -xJf /tmp/source-sync.tar.xz -C .
 
           while IFS=$'\t' read -r expected path; do

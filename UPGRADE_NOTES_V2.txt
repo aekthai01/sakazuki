@@ -1,0 +1,44 @@
+Sakazuki maintenance upgrade v2
+================================
+
+What changed
+------------
+1. Maintenance history repair now recognizes the second legacy pattern found on 005 ONL:
+   - history.id has no PRIMARY KEY / AUTO_INCREMENT
+   - many rows use id=0
+   - every non-zero id is still unique
+   - there are no negative/null ids and no external FK references
+   In this narrowly verified shape, maintenance creates history_backup_identity_v3,
+   rebuilds the audit-only identity column, validates it, and performs a real INSERT+DELETE probe.
+
+2. Maintenance authentication is compartmentalized from the 1-minute critical/stock URL.
+   - Critical / stock URL behavior and credential validation are unchanged.
+   - Maintenance uses a mode-bound HMAC-SHA256 credential derived from the stored scheduler hash
+     and the site's private encryption key.
+   - The raw critical credential is no longer accepted for mode=maintenance.
+   - Open Admin > Settings after deployment and copy the NEW Maintenance URL.
+   - Do NOT replace the existing Critical / Stock 1-minute URL.
+
+3. Maintenance logging is more detailed.
+   - Every history-schema step is written to PHP error_log with safe counters/metadata.
+   - Maintenance runs get a run_id, start/finish log lines, job status/duration logs, and the same run_id in JSON.
+   - No customer details, gift codes, API credentials, provider payloads, or scheduler secrets are logged.
+
+4. Existing financial hardening remains included:
+   - Binance Gift Card audit-history failure cannot roll back an otherwise successful local credit.
+   - Binance TRC20 audit-history failure cannot roll back an otherwise successful deposit.
+   - logHistory() records execute errno/error safely when an INSERT fails.
+
+005 ONL test sequence
+---------------------
+A. Upload all files in this patch to their matching paths.
+B. Open Admin > Settings and copy the NEW Maintenance URL.
+   Leave the existing Critical / Stock every-1-minute URL unchanged.
+C. Run the new Maintenance URL once.
+   Expected history_schema.success=true, changed=true, runtime_insert_probe=ok.
+D. Run it again.
+   Expected history_schema.success=true, changed=false, skipped=true.
+E. Verify checkout_health.history_ready=true.
+
+The previous history_backup_identity_v2 created by v1 is intentionally left untouched.
+This version uses history_backup_identity_v3 so its backup is fresh and unambiguous.

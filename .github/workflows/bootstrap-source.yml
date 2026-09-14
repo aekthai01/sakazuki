@@ -22,15 +22,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          shopt -s nullglob
-          parts=(bootstrap/blackup-v3-source.b64part*)
-          if [ "${#parts[@]}" -eq 0 ]; then
-            echo "No bootstrap parts found; nothing to import."
+          archive='bootstrap/blackup-v3-source.tar.xz'
+          if [ ! -f "$archive" ]; then
+            echo "Bootstrap archive not found: $archive"
             exit 1
           fi
-          cat "${parts[@]}" | base64 --decode > /tmp/blackup-v3-source.tar.xz
-          tar -xJf /tmp/blackup-v3-source.tar.xz -C .
-          rm -f bootstrap/blackup-v3-source.b64part* bootstrap/READY
+
+          tar -xJf "$archive" -C .
+          rm -f "$archive" bootstrap/READY bootstrap/blackup-v3-source.b64part*
           rmdir bootstrap 2>/dev/null || true
 
           git config user.name "github-actions[bot]"
@@ -40,5 +39,5 @@ jobs:
             echo "No source changes to commit."
             exit 0
           fi
-          git commit -m "Import BLACKUP V3 source snapshot"
+          git commit -m "Import sanitized BLACKUP V3 source snapshot"
           git push

@@ -1,0 +1,18 @@
+# Production secrets and host-specific credentials
+/private/database.php
+/private/cheatgame.php
+/private/xchetos.php
+/private/*_secret.php
+/private/*.lock
+
+# Runtime/cache state
+/private/purchase_activity_cache_v4.json
+/public_html/includes/exchange_rate_cache.json
+**/error_log
+*.log
+
+# Local/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

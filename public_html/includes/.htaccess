@@ -1,0 +1,12 @@
+# ============================================================
+# BLOCK ALL DIRECT ACCESS TO INCLUDES
+# These files should ONLY be included by PHP, never accessed via URL
+# ============================================================
+
+<IfModule mod_authz_core.c>
+    Require all denied
+</IfModule>
+<IfModule !mod_authz_core.c>
+    Order deny,allow
+    Deny from all
+</IfModule>

@@ -1,0 +1,44 @@
+name: Bootstrap BLACKUP V3 source
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'bootstrap/blackup-v3-source.part*'
+
+permissions:
+  contents: write
+
+jobs:
+  unpack-source:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Unpack reviewed source snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          parts=(bootstrap/blackup-v3-source.part*)
+          if [ "${#parts[@]}" -eq 0 ]; then
+            echo "No bootstrap parts found; nothing to import."
+            exit 0
+          fi
+          cat "${parts[@]}" > /tmp/blackup-v3-source.tar.xz
+          tar -xJf /tmp/blackup-v3-source.tar.xz -C .
+          rm -f bootstrap/blackup-v3-source.part*
+          rmdir bootstrap 2>/dev/null || true
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No source changes to commit."
+            exit 0
+          fi
+          git commit -m "Import BLACKUP V3 source snapshot"
+          git push

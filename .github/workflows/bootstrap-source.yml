@@ -18,25 +18,17 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Unpack reviewed source snapshot
+      - name: Import reviewed source snapshot
+        run: python tools/bootstrap_import.py
+
+      - name: Commit imported source
         shell: bash
         run: |
           set -euo pipefail
-          archive='bootstrap/blackup-v3-source.tar.xz'
-          if [ ! -f "$archive" ]; then
-            echo "Bootstrap archive not found: $archive"
-            exit 1
-          fi
-
-          tar -xJf "$archive" -C .
-          rm -f "$archive" bootstrap/READY bootstrap/blackup-v3-source.b64part*
-          rmdir bootstrap 2>/dev/null || true
-
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
           if git diff --cached --quiet; then
-            echo "No source changes to commit."
             exit 0
           fi
           git commit -m "Import sanitized BLACKUP V3 source snapshot"

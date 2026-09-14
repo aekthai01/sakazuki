@@ -1,0 +1,160 @@
+/* Key Selling System - Modern Glass UI */
+
+:root {
+    --primary-color: #6f7cff;
+    --success-color: #22c55e;
+    --danger-color: #ef4444;
+    --warning-color: #facc15;
+    --info-color: #38bdf8;
+    --dark-color: #020617;
+    --light-color: #f8fafc;
+}
+
+/* ===== BODY BACKGROUND ===== */
+body {
+    background: radial-gradient(circle at top,#0f172a,#020617);
+    color:#e5e7eb;
+}
+
+/* ===== AUTH ===== */
+.auth-page {
+    background: linear-gradient(135deg,#0f172a,#020617);
+    min-height:100vh;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+}
+
+.auth-page .card {
+    border-radius:18px;
+}
+
+/* ===== NAVBAR ===== */
+.navbar {
+    background:rgba(15,23,42,0.65)!important;
+    backdrop-filter:blur(14px);
+    border-bottom:1px solid rgba(255,255,255,0.06);
+}
+
+.navbar-brand {
+    font-weight:600;
+}
+
+/* ===== GLASS CARD ===== */
+.card {
+    background:rgba(15,23,42,0.65)!important;
+    backdrop-filter:blur(16px);
+    border-radius:18px;
+    border:1px solid rgba(255,255,255,0.05);
+    transition:all .15s ease;
+    box-shadow:0 10px 35px rgba(0,0,0,0.35);
+}
+
+.card:hover {
+    transform:translateY(-6px);
+    box-shadow:0 18px 45px rgba(0,0,0,0.45);
+}
+
+/* ===== PRODUCT CARD IMAGE AUTO FIT ===== */
+.card img {
+    width:100%;
+    aspect-ratio:1/1;
+    object-fit:cover;
+    border-radius:14px;
+}
+
+/* ===== TABLE ===== */
+.table {
+    border-radius:14px;
+    overflow:hidden;
+    background:rgba(15,23,42,0.6);
+}
+
+.table thead {
+    background:rgba(255,255,255,0.05);
+}
+
+/* ===== BUTTON ===== */
+.btn {
+    border-radius:10px;
+    font-weight:500;
+    transition:all .15s ease;
+}
+
+.btn:hover {
+    transform:translateY(-2px);
+    box-shadow:0 6px 18px rgba(0,0,0,0.25);
+}
+
+/* ===== FORM ===== */
+.form-control,
+.form-select {
+    background:rgba(255,255,255,0.06);
+    border:1px solid rgba(255,255,255,0.08);
+    color:#fff;
+    border-radius:12px;
+}
+
+.form-control:focus,
+.form-select:focus {
+    border-color:var(--primary-color);
+    box-shadow:0 0 0 .15rem rgba(111,124,255,.2);
+}
+
+/* ===== BADGE ===== */
+.badge {
+    border-radius:8px;
+    padding:.45rem .7rem;
+}
+
+/* ===== DROPDOWN ===== */
+.dropdown-menu {
+    background:rgba(15,23,42,0.85);
+    backdrop-filter:blur(16px);
+    border-radius:14px;
+    border:1px solid rgba(255,255,255,0.06);
+}
+
+/* ===== ALERT ===== */
+.alert {
+    border-radius:14px;
+    border:none;
+}
+
+/* ===== CONTAINER ===== */
+.container-fluid {
+    padding-left:1.5rem;
+    padding-right:1.5rem;
+}
+
+/* ===== SCROLLBAR ===== */
+::-webkit-scrollbar {
+    width:8px;
+}
+::-webkit-scrollbar-thumb {
+    background:#334155;
+    border-radius:10px;
+}
+
+/* ===== PAYMENT PANEL GLASS ===== */
+.payment-panel {
+    background:rgba(15,23,42,0.65);
+    backdrop-filter:blur(14px);
+    border-radius:18px;
+    border:1px solid rgba(255,255,255,0.05);
+}
+
+/* ===== RESPONSIVE ===== */
+@media(max-width:768px){
+    .container-fluid{
+        padding-left:1rem;
+        padding-right:1rem;
+    }
+}
+
+/* ===== TEXT GRADIENT ===== */
+.text-gradient {
+    background:linear-gradient(135deg,#7c83ff,#a855f7);
+    -webkit-background-clip:text;
+    -webkit-text-fill-color:transparent;
+}

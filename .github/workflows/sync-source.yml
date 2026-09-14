@@ -52,10 +52,16 @@ jobs:
             fi
           done < .source-sync/manifest.tsv
 
+          touch /tmp/source-sync-ready
+
       - name: Commit verified snapshot
         shell: bash
         run: |
           set -euo pipefail
+          if [ ! -f /tmp/source-sync-ready ]; then
+            echo 'No verified source payload; leaving staging files untouched.'
+            exit 0
+          fi
           rm -rf .source-sync
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'

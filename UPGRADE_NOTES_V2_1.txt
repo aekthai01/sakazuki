@@ -1,0 +1,96 @@
+Sakazuki Maintenance Upgrade v2.1
+=================================
+
+Purpose
+-------
+This is a cumulative patch: it includes the v2 history repair / maintenance-only
+HMAC authentication changes plus the v2.1 observability and health coverage.
+The same ZIP can be deployed to both the 005 and 010 sites even though they use
+separate databases.
+
+Important boundary
+------------------
+The one-minute Critical/stock synchronization behavior is intentionally NOT
+changed by v2.1. The critical job definitions and the maintenance/critical token
+separation introduced in v2 remain intact. Do not change the existing Critical
+cron URL when deploying this patch.
+
+V2.1 changes
+------------
+1. History schema normalization
+   - If history identity is already correct but idx_history_user_created is
+     missing, Maintenance adds only that performance index.
+   - Healthy PRIMARY KEY/AUTO_INCREMENT values are not rebuilt.
+   - Existing v2 safe legacy-ID repair, backup, FK checks, validation and real
+     INSERT probe remain in place.
+
+2. Maintenance response observability
+   - Adds maintenance_version=2.1.0 and diagnostics_schema.
+   - Adds bounded nested diagnostics for maintenance jobs instead of forcing an
+     operator to inspect multiple PHP functions or server logs.
+   - Every Maintenance run keeps the run_id correlation ID.
+   - Diagnostic SQL probe failures are surfaced as probe_failures and degrade
+     Maintenance instead of silently appearing healthy.
+
+3. Commerce Center diagnostics
+   - Separates source attempted/succeeded/failed counts from ledger counts.
+   - Reports per-source query errors and bounded ledger error stage/code/detail.
+   - Shows unresolved commerce_sync_failures with safe error summaries.
+
+4. Binance clock diagnostics
+   - Maintenance JSON now reports message, HTTP status, cURL errno and oversized
+     response state in addition to offset/RTT.
+   - This does not change Binance signing, timestamp, redeem or credit logic.
+
+5. Read-only payment rail health
+   - Wallet ledger schema health.
+   - Bank slip/EasySlip durable-job health and stale/pending counts.
+   - TrueMoney pending-local-credit/stale-processing counts.
+   - Binance TRC20 schema, stale lock and clock health.
+   - Binance Gift Card pending-local-credit counts.
+   - These are health probes only. They do not submit/redeem/credit money.
+
+6. Background job state
+   - Reports last start/finish/success, next run, duration, runner, safe message,
+     and consecutive failure count for Critical and Maintenance jobs.
+   - Two or more consecutive failures are surfaced as a Maintenance warning.
+   - The shared heartbeat is labelled only as runner_heartbeat_recent; it is not
+     falsely presented as proof that the one-minute Critical scheduler ran.
+
+7. Better job failure details
+   - CGO full catalog Maintenance job returns stage/error code/detail.
+   - History cleanup returns explicit failure codes/details.
+   - Commerce Center ledger/source enumeration failures are explicit.
+   - Routine diagnostics should normally be understandable from the Maintenance
+     JSON. PHP/server logs remain the last-resort source for fatal PHP errors,
+     memory/parse/web-server failures, and unexpected infrastructure failures.
+
+Deployment
+----------
+Upload the files from this archive over the matching paths under public_html.
+This archive is cumulative, so deploy the same archive on 005 and 010.
+
+Maintenance URL/auth
+--------------------
+The v2 Maintenance-only HMAC-SHA256 credential scheme remains unchanged in
+v2.1. If v2 is already installed, the existing Maintenance URL shown in Admin >
+Settings remains valid. The Critical/stock one-minute credential and URL are not
+rotated by this patch.
+
+Expected first run
+------------------
+- A v2-migrated database should normally report history_schema changed=false.
+- A manually repaired database that lacks idx_history_user_created may report
+  changed=true only because the index was added; IDs are not renumbered.
+- Existing commerce/payment problems can legitimately make health=degraded.
+  Read diagnostics.issues and the matching diagnostics section for the reason.
+
+Expected second run
+-------------------
+Schema/index work should be idempotent. A healthy history table should report
+changed=false/skipped=true on later runs.
+
+Operational note
+----------------
+Keep history_backup_identity_v3 for now while validating the sites. Do not drop
+it merely because v2.1 reports healthy.

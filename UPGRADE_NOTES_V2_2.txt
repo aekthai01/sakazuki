@@ -1,0 +1,34 @@
+Sakazuki Maintenance V2.2
+=========================
+
+Purpose
+-------
+Commerce Center recovery after V2.1 diagnostics exposed two production defects:
+1) multibyte delivery keys could be masked by byte offsets, producing invalid UTF-8 in commerce_deliveries.key_mask;
+2) the transaction-ledger reconciliation compared status columns with different collations and could fail before enumerating any rows.
+
+Changes
+-------
+- commerceCenterMaskKey() is now Unicode-safe and never slices through a UTF-8 code point.
+- Invalid UTF-8 key material is represented only by a short one-way fingerprint in key_mask; raw key material is never logged.
+- Maintenance now reports a commerce_schema block and normalizes commerce_deliveries.key_mask to utf8mb4_unicode_ci when the legacy definition is otherwise safe.
+- A rolled-back real Unicode write probe verifies key_mask after maintenance.
+- Ledger status comparison explicitly converts both sides to utf8mb4_unicode_ci instead of altering the authoritative transactions table.
+- Existing unresolved ledger_transaction failures are included and prioritized by the ledger reconciler.
+- If Commerce schema changed or unresolved Commerce failures exist, maintenance forces one bounded Commerce recovery pass immediately.
+- The normal one-minute Critical/Stock runner and its job definitions are unchanged.
+
+Expected first maintenance run
+------------------------------
+- maintenance_version: 2.2.0
+- commerce_schema.success: true
+- commerce_schema.runtime_unicode_probe: ok (inside steps) when a delivery row exists
+- commerce_center ledger should begin processing instead of failing with Illegal mix of collations
+- unresolved Commerce failures should decrease as their source rows successfully replay
+
+Safety
+------
+- No automatic ALTER is performed on transactions or other authoritative money tables.
+- Only the Commerce read-model key_mask column may be normalized, and only for a narrow known VARCHAR shape. Unexpected definitions are blocked for review.
+- Unicode probe is wrapped in a transaction and rolled back.
+- Critical/Stock 1-minute behavior is not changed.

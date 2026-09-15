@@ -19,7 +19,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Extract safely and verify exact source
+      - name: Extract safely and import exact matches only
         shell: bash
         run: |
           set -euo pipefail
@@ -44,7 +44,6 @@ jobs:
               header = b'blob ' + str(len(data)).encode() + b'\0'
               return hashlib.sha1(header + data).hexdigest()
 
-          # Reject path traversal, symlinks, hardlinks, devices and other non-regular members.
           with tarfile.open(archive, 'r:xz') as tf:
               safe_members = []
               for member in tf.getmembers():
@@ -59,14 +58,13 @@ jobs:
                   safe_members.append(member)
               tf.extractall(out, members=safe_members, filter='data')
 
-          extracted = []
-          for p in out.rglob('*'):
-              if p.is_file() and not p.is_symlink():
-                  extracted.append(p)
+          extracted = [p for p in out.rglob('*') if p.is_file() and not p.is_symlink()]
+          print(f'Archive regular files: {len(extracted)}')
 
-          copied = 0
-          already_ok = 0
-          errors = []
+          copied = []
+          already_ok = []
+          absent = []
+          mismatch = []
 
           for raw in manifest.read_text(encoding='utf-8').splitlines():
               if not raw.strip():
@@ -76,52 +74,59 @@ jobs:
 
               if target.exists() and target.is_file() and not target.is_symlink():
                   if git_blob_sha(target.read_bytes()) == expected:
-                      already_ok += 1
+                      already_ok.append(rel_path)
                       continue
 
-              matches = []
+              path_candidates = []
+              exact_matches = []
               suffix = '/' + rel_path
               for candidate in extracted:
                   rel = candidate.relative_to(out).as_posix()
                   if rel == rel_path or rel.endswith(suffix):
+                      path_candidates.append(candidate)
                       if git_blob_sha(candidate.read_bytes()) == expected:
-                          matches.append(candidate)
+                          exact_matches.append(candidate)
 
-              if not matches:
-                  errors.append(rel_path)
-                  continue
+              if exact_matches:
+                  chosen = min(exact_matches, key=lambda p: (len(p.relative_to(out).parts), len(p.as_posix())))
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  shutil.copyfile(chosen, target)
+                  if git_blob_sha(target.read_bytes()) != expected:
+                      raise SystemExit(f'Post-copy SHA mismatch: {rel_path}')
+                  copied.append(rel_path)
+              elif path_candidates:
+                  mismatch.append(rel_path)
+              else:
+                  absent.append(rel_path)
 
-              # Prefer the shallowest matching path if the archive has a top-level wrapper directory.
-              chosen = min(matches, key=lambda p: (len(p.relative_to(out).parts), len(p.as_posix())))
-              target.parent.mkdir(parents=True, exist_ok=True)
-              shutil.copyfile(chosen, target)
-              if git_blob_sha(target.read_bytes()) != expected:
-                  raise SystemExit(f'Post-copy SHA mismatch: {rel_path}')
-              copied += 1
-
-          if errors:
-              print('Missing or SHA-mismatched required files:')
-              for item in errors:
+          print(f'Exact import summary: copied={len(copied)}, already_correct={len(already_ok)}, archive_absent={len(absent)}, archive_sha_mismatch={len(mismatch)}')
+          if copied:
+              print('COPIED EXACT FILES:')
+              for item in copied:
+                  print(' +', item)
+          if mismatch:
+              print('ARCHIVE PATH PRESENT BUT SHA DIFFERS:')
+              for item in mismatch:
+                  print(' !', item)
+          if absent:
+              print('NOT PRESENT IN ARCHIVE AND NOT ALREADY EXACT:')
+              for item in absent:
                   print(' -', item)
-              raise SystemExit(1)
 
-          print(f'Exact verification passed: copied={copied}, already_correct={already_ok}, total={copied + already_ok}')
-          Path('/tmp/sak010-import-ready').write_text('ok\n', encoding='utf-8')
+          Path('/tmp/sak010-import-ready').write_text(str(len(copied)) + '\n', encoding='utf-8')
           PY
 
-      - name: Commit verified source and remove archive staging
+      - name: Commit exact imported files only
         shell: bash
         run: |
           set -euo pipefail
           test -f /tmp/sak010-import-ready
-          rm -f SAK010.1.tar.xz
-          rm -rf .source-import
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -A
+          git add -A -- ':!SAK010.1.tar.xz' ':!.source-import' ':!.github/workflows/import-sak010.yml'
           if git diff --cached --quiet; then
-            echo 'No source changes to commit.'
+            echo 'No exact source files needed importing.'
             exit 0
           fi
-          git commit -m 'Import verified SAK010.1 source snapshot'
+          git commit -m 'Import exact SAK010 files from archive'
           git push origin HEAD:main

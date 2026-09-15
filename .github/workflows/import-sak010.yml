@@ -1,4 +1,4 @@
-name: Import Exact SAK010.1 Archive
+name: Inspect SAK010.1 Archive Safety
 
 on:
   push:
@@ -8,125 +8,46 @@ on:
       - '.github/workflows/import-sak010.yml'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  import-source:
+  inspect:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Extract safely and import exact matches only
+      - name: Inspect archive member names only
         shell: bash
         run: |
           set -euo pipefail
-          test -f SAK010.1.tar.xz
-          test -f .source-import/manifest.tsv
-
           python3 - <<'PY'
-          from pathlib import Path, PurePosixPath
-          import hashlib
-          import shutil
+          from pathlib import PurePosixPath
           import tarfile
 
-          repo = Path('.').resolve()
-          archive = repo / 'SAK010.1.tar.xz'
-          manifest = repo / '.source-import' / 'manifest.tsv'
-          out = Path('/tmp/sak010_1_extract')
-          if out.exists():
-              shutil.rmtree(out)
-          out.mkdir(parents=True)
+          secrets = {
+              'private/cheatgame.php',
+              'private/database.php',
+              'private/key_reset_vault_secret.php',
+              'private/purchase_activity_cache_v4.json',
+              'private/recovery_mail_secret.php',
+              'private/store_bridge_legacy_keys.php',
+              'private/store_bridge_secret.php',
+              'private/store_bridge_secret.php.lock',
+              'private/xchetos.php',
+              'public_html/includes/exchange_rate_cache.json',
+          }
 
-          def git_blob_sha(data: bytes) -> str:
-              header = b'blob ' + str(len(data)).encode() + b'\0'
-              return hashlib.sha1(header + data).hexdigest()
-
-          with tarfile.open(archive, 'r:xz') as tf:
-              safe_members = []
+          found = []
+          with tarfile.open('SAK010.1.tar.xz', 'r:xz') as tf:
               for member in tf.getmembers():
-                  posix = PurePosixPath(member.name)
-                  if posix.is_absolute() or '..' in posix.parts:
-                      raise SystemExit(f'Unsafe archive path: {member.name}')
-                  if member.isdir():
-                      safe_members.append(member)
-                      continue
                   if not member.isfile():
-                      raise SystemExit(f'Unsupported archive member type: {member.name}')
-                  safe_members.append(member)
-              tf.extractall(out, members=safe_members, filter='data')
-
-          extracted = [p for p in out.rglob('*') if p.is_file() and not p.is_symlink()]
-          print(f'Archive regular files: {len(extracted)}')
-
-          copied = []
-          already_ok = []
-          absent = []
-          mismatch = []
-
-          for raw in manifest.read_text(encoding='utf-8').splitlines():
-              if not raw.strip():
-                  continue
-              expected, rel_path = raw.split('\t', 1)
-              target = repo / Path(rel_path)
-
-              if target.exists() and target.is_file() and not target.is_symlink():
-                  if git_blob_sha(target.read_bytes()) == expected:
-                      already_ok.append(rel_path)
                       continue
+                  rel = PurePosixPath(member.name).as_posix().lstrip('./')
+                  for secret in secrets:
+                      if rel == secret or rel.endswith('/' + secret):
+                          found.append(secret)
 
-              path_candidates = []
-              exact_matches = []
-              suffix = '/' + rel_path
-              for candidate in extracted:
-                  rel = candidate.relative_to(out).as_posix()
-                  if rel == rel_path or rel.endswith(suffix):
-                      path_candidates.append(candidate)
-                      if git_blob_sha(candidate.read_bytes()) == expected:
-                          exact_matches.append(candidate)
-
-              if exact_matches:
-                  chosen = min(exact_matches, key=lambda p: (len(p.relative_to(out).parts), len(p.as_posix())))
-                  target.parent.mkdir(parents=True, exist_ok=True)
-                  shutil.copyfile(chosen, target)
-                  if git_blob_sha(target.read_bytes()) != expected:
-                      raise SystemExit(f'Post-copy SHA mismatch: {rel_path}')
-                  copied.append(rel_path)
-              elif path_candidates:
-                  mismatch.append(rel_path)
-              else:
-                  absent.append(rel_path)
-
-          print(f'Exact import summary: copied={len(copied)}, already_correct={len(already_ok)}, archive_absent={len(absent)}, archive_sha_mismatch={len(mismatch)}')
-          if copied:
-              print('COPIED EXACT FILES:')
-              for item in copied:
-                  print(' +', item)
-          if mismatch:
-              print('ARCHIVE PATH PRESENT BUT SHA DIFFERS:')
-              for item in mismatch:
-                  print(' !', item)
-          if absent:
-              print('NOT PRESENT IN ARCHIVE AND NOT ALREADY EXACT:')
-              for item in absent:
-                  print(' -', item)
-
-          Path('/tmp/sak010-import-ready').write_text(str(len(copied)) + '\n', encoding='utf-8')
+          print(f'Known secret/runtime paths present: {len(set(found))}')
+          for item in sorted(set(found)):
+              print('SECRET_PATH_PRESENT:', item)
           PY
-
-      - name: Commit exact imported files only
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -f /tmp/sak010-import-ready
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -A -- ':!SAK010.1.tar.xz' ':!.source-import' ':!.github/workflows/import-sak010.yml'
-          if git diff --cached --quiet; then
-            echo 'No exact source files needed importing.'
-            exit 0
-          fi
-          git commit -m 'Import exact SAK010 files from archive'
-          git push origin HEAD:main

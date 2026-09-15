@@ -1,0 +1,127 @@
+name: Import Exact SAK010.1 Archive
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/import-sak010.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  import-source:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract safely and verify exact source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f SAK010.1.tar.xz
+          test -f .source-import/manifest.tsv
+
+          python3 - <<'PY'
+          from pathlib import Path, PurePosixPath
+          import hashlib
+          import shutil
+          import tarfile
+
+          repo = Path('.').resolve()
+          archive = repo / 'SAK010.1.tar.xz'
+          manifest = repo / '.source-import' / 'manifest.tsv'
+          out = Path('/tmp/sak010_1_extract')
+          if out.exists():
+              shutil.rmtree(out)
+          out.mkdir(parents=True)
+
+          def git_blob_sha(data: bytes) -> str:
+              header = b'blob ' + str(len(data)).encode() + b'\0'
+              return hashlib.sha1(header + data).hexdigest()
+
+          # Reject path traversal, symlinks, hardlinks, devices and other non-regular members.
+          with tarfile.open(archive, 'r:xz') as tf:
+              safe_members = []
+              for member in tf.getmembers():
+                  posix = PurePosixPath(member.name)
+                  if posix.is_absolute() or '..' in posix.parts:
+                      raise SystemExit(f'Unsafe archive path: {member.name}')
+                  if member.isdir():
+                      safe_members.append(member)
+                      continue
+                  if not member.isfile():
+                      raise SystemExit(f'Unsupported archive member type: {member.name}')
+                  safe_members.append(member)
+              tf.extractall(out, members=safe_members, filter='data')
+
+          extracted = []
+          for p in out.rglob('*'):
+              if p.is_file() and not p.is_symlink():
+                  extracted.append(p)
+
+          copied = 0
+          already_ok = 0
+          errors = []
+
+          for raw in manifest.read_text(encoding='utf-8').splitlines():
+              if not raw.strip():
+                  continue
+              expected, rel_path = raw.split('\t', 1)
+              target = repo / Path(rel_path)
+
+              if target.exists() and target.is_file() and not target.is_symlink():
+                  if git_blob_sha(target.read_bytes()) == expected:
+                      already_ok += 1
+                      continue
+
+              matches = []
+              suffix = '/' + rel_path
+              for candidate in extracted:
+                  rel = candidate.relative_to(out).as_posix()
+                  if rel == rel_path or rel.endswith(suffix):
+                      if git_blob_sha(candidate.read_bytes()) == expected:
+                          matches.append(candidate)
+
+              if not matches:
+                  errors.append(rel_path)
+                  continue
+
+              # Prefer the shallowest matching path if the archive has a top-level wrapper directory.
+              chosen = min(matches, key=lambda p: (len(p.relative_to(out).parts), len(p.as_posix())))
+              target.parent.mkdir(parents=True, exist_ok=True)
+              shutil.copyfile(chosen, target)
+              if git_blob_sha(target.read_bytes()) != expected:
+                  raise SystemExit(f'Post-copy SHA mismatch: {rel_path}')
+              copied += 1
+
+          if errors:
+              print('Missing or SHA-mismatched required files:')
+              for item in errors:
+                  print(' -', item)
+              raise SystemExit(1)
+
+          print(f'Exact verification passed: copied={copied}, already_correct={already_ok}, total={copied + already_ok}')
+          Path('/tmp/sak010-import-ready').write_text('ok\n', encoding='utf-8')
+          PY
+
+      - name: Commit verified source and remove archive staging
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f /tmp/sak010-import-ready
+          rm -f SAK010.1.tar.xz
+          rm -rf .source-import
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          if git diff --cached --quiet; then
+            echo 'No source changes to commit.'
+            exit 0
+          fi
+          git commit -m 'Import verified SAK010.1 source snapshot'
+          git push origin HEAD:main

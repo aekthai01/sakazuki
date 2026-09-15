@@ -1,12 +1,12 @@
 <?php
 // Private application configuration. Keep this directory outside public_html.
-// Copy this file to private/database.php and replace placeholders with the real values.
-if (!defined('APP_BASE_URL')) define('APP_BASE_URL', 'https://your-domain.example');
+// Generated from the website's existing working database settings.
+if (!defined('APP_BASE_URL')) define('APP_BASE_URL', 'https://sakazuki.spwz.online');
 if (!defined('TRUEMONEY_PROVIDER_URL')) define('TRUEMONEY_PROVIDER_URL', 'https://truemoneyapi.vercel.app/api/truewallet');
 
 return [
     'host' => 'localhost',
-    'user' => 'YOUR_DATABASE_USER',
-    'pass' => 'YOUR_DATABASE_PASSWORD',
-    'name' => 'YOUR_DATABASE_NAME',
+    'user' => 'ihu4qqshopxy_test001',
+    'pass' => 'bGthYzpxxnaK4J98kcWw',
+    'name' => 'ihu4qqshopxy_test001',
 ];

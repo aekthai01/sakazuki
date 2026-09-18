@@ -17,13 +17,13 @@ jobs:
     timeout-minutes: 5
 
     env:
-      FTP_HOST: ${{ secrets.FTP_HOST }}
+      FTP_HOST: svth01.inwcloud.shop
       FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
       FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
       FTP_REMOTE_DIR: ${{ secrets.FTP_REMOTE_DIR }}
 
     steps:
-      - name: Validate required secrets
+      - name: Validate FTP configuration
         shell: bash
         run: |
           set -euo pipefail
@@ -32,7 +32,7 @@ jobs:
 
           for name in FTP_HOST FTP_USERNAME FTP_PASSWORD FTP_REMOTE_DIR; do
             if [ -z "${!name:-}" ]; then
-              echo "Missing required secret: $name"
+              echo "Missing required FTP setting: $name"
               missing=1
             fi
           done
@@ -41,7 +41,7 @@ jobs:
             exit 1
           fi
 
-          echo "All required FTP secrets are present."
+          echo "All required FTP settings are present."
 
       - name: Test FTP authentication
         shell: bash

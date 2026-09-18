@@ -9,8 +9,9 @@ $requestStartedAt = isset($_SERVER['REQUEST_TIME_FLOAT']) && is_numeric($_SERVER
 require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/ranking.php';
 require_once __DIR__ . '/includes/store_bridge.php';
-requireLogin();
-requireActive();
+requireLogin(true);
+requireActive(true);
+accountVerificationRequireComplete(true);
 header('Content-Type: application/json; charset=utf-8');
 
 if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {

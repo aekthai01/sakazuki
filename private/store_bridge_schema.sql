@@ -1,4 +1,4 @@
--- Sakazuki Store Bridge schema v2.1
+-- Sakazuki Store Bridge schema v2.6
 -- Run this only when the database account used by PHP cannot create tables.
 -- The application creates the same tables automatically from admin/api_hub.php.
 
@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS store_api_clients (
             order_rate_limit_per_minute INT UNSIGNED NOT NULL DEFAULT 10,
             max_order_amount DECIMAL(16,2) NOT NULL DEFAULT 0,
             daily_spend_limit DECIMAL(16,2) NOT NULL DEFAULT 0,
+            source_access_json TEXT NULL,
             created_by BIGINT UNSIGNED NULL,
             last_used_at DATETIME NULL,
             deleted_at DATETIME NULL,
@@ -81,6 +82,14 @@ CREATE TABLE IF NOT EXISTS store_api_orders (
             balance_before DECIMAL(16,2) NULL,
             balance_after DECIMAL(16,2) NULL,
             request_fingerprint CHAR(64) NULL,
+            fulfillment_source VARCHAR(20) NOT NULL DEFAULT 'local',
+            fulfillment_reason VARCHAR(80) NULL,
+            upstream_order_id BIGINT UNSIGNED NULL,
+            upstream_reference VARCHAR(190) NULL,
+            upstream_status VARCHAR(40) NULL,
+            procurement_cost DECIMAL(16,2) NULL,
+            refunded_amount DECIMAL(16,2) NULL,
+            refunded_at DATETIME NULL,
             error_message VARCHAR(1000) NULL,
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -97,7 +106,9 @@ CREATE TABLE IF NOT EXISTS store_api_orders (
 CREATE TABLE IF NOT EXISTS store_api_order_keys (
             id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
             order_id BIGINT UNSIGNED NOT NULL,
-            source_key_id BIGINT UNSIGNED NOT NULL,
+            source_type VARCHAR(20) NOT NULL DEFAULT 'local',
+            source_key_id BIGINT UNSIGNED NULL,
+            source_order_id BIGINT UNSIGNED NULL,
             key_code TEXT NOT NULL,
             key_hash CHAR(64) NOT NULL,
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -192,6 +203,7 @@ CREATE TABLE IF NOT EXISTS supplier_connections (
             id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
             name VARCHAR(190) NOT NULL,
             provider_type VARCHAR(60) NOT NULL DEFAULT 'sakazuki_v1',
+            purchase_mode VARCHAR(20) NOT NULL DEFAULT 'live',
             endpoint_url VARCHAR(1000) NOT NULL,
             api_key_ciphertext TEXT NOT NULL,
             status ENUM('active','inactive') NOT NULL DEFAULT 'active',
@@ -279,6 +291,8 @@ CREATE TABLE IF NOT EXISTS supplier_catalog_links (
             local_product_id INT NOT NULL,
             local_variant_id INT NOT NULL,
             api_fallback_enabled TINYINT(1) NOT NULL DEFAULT 1,
+            source_priority INT NOT NULL DEFAULT 100,
+            max_supplier_cost DECIMAL(16,2) NULL,
             sync_duration TINYINT(1) NOT NULL DEFAULT 1,
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -292,6 +306,8 @@ CREATE TABLE IF NOT EXISTS supplier_catalog_links (
 CREATE TABLE IF NOT EXISTS supplier_orders (
             id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
             external_ref VARCHAR(120) NOT NULL,
+            source_kind VARCHAR(20) NOT NULL DEFAULT 'storefront',
+            source_order_id BIGINT UNSIGNED NULL,
             connection_id BIGINT UNSIGNED NOT NULL,
             supplier_product_id BIGINT UNSIGNED NOT NULL,
             user_id BIGINT UNSIGNED NOT NULL,
@@ -315,7 +331,8 @@ CREATE TABLE IF NOT EXISTS supplier_orders (
             KEY idx_supplier_order_user (user_id, created_at),
             KEY idx_supplier_order_status (status),
             KEY idx_supplier_order_transaction (transaction_id),
-            KEY idx_supplier_order_connection (connection_id, created_at)
+            KEY idx_supplier_order_connection (connection_id, created_at),
+            KEY idx_supplier_order_source (source_kind, source_order_id, created_at)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS supplier_order_keys (
@@ -352,6 +369,11 @@ CREATE TABLE IF NOT EXISTS supplier_inventory_logs (
 
 -- Existing installations need these columns as well. MariaDB 10.11 supports
 -- ADD COLUMN IF NOT EXISTS, making this file safe on both project databases.
+ALTER TABLE supplier_connections ADD COLUMN IF NOT EXISTS purchase_mode VARCHAR(20) NOT NULL DEFAULT 'live' AFTER provider_type;
+ALTER TABLE supplier_catalog_links ADD COLUMN IF NOT EXISTS max_supplier_cost DECIMAL(16,2) NULL AFTER source_priority;
+ALTER TABLE supplier_orders ADD COLUMN IF NOT EXISTS source_kind VARCHAR(20) NOT NULL DEFAULT 'storefront' AFTER external_ref;
+ALTER TABLE supplier_orders ADD COLUMN IF NOT EXISTS source_order_id BIGINT UNSIGNED NULL AFTER source_kind;
+ALTER TABLE supplier_orders ADD INDEX IF NOT EXISTS idx_supplier_order_source (source_kind, source_order_id, created_at);
 ALTER TABLE supplier_products ADD COLUMN IF NOT EXISTS inventory_revision VARCHAR(190) NULL AFTER inventory_checked_at;
 ALTER TABLE supplier_products ADD COLUMN IF NOT EXISTS inventory_last_success_at DATETIME NULL AFTER inventory_revision;
 ALTER TABLE supplier_products ADD COLUMN IF NOT EXISTS inventory_last_error_code VARCHAR(80) NULL AFTER inventory_last_success_at;
@@ -382,6 +404,7 @@ ALTER TABLE store_api_clients ADD COLUMN IF NOT EXISTS webhook_last_debug_json M
 ALTER TABLE store_api_clients ADD COLUMN IF NOT EXISTS order_rate_limit_per_minute INT UNSIGNED NOT NULL DEFAULT 10 AFTER rate_limit_per_minute;
 ALTER TABLE store_api_clients ADD COLUMN IF NOT EXISTS max_order_amount DECIMAL(16,2) NOT NULL DEFAULT 0 AFTER order_rate_limit_per_minute;
 ALTER TABLE store_api_clients ADD COLUMN IF NOT EXISTS daily_spend_limit DECIMAL(16,2) NOT NULL DEFAULT 0 AFTER max_order_amount;
+ALTER TABLE store_api_clients ADD COLUMN IF NOT EXISTS source_access_json TEXT NULL AFTER daily_spend_limit;
 
 ALTER TABLE store_api_orders ADD COLUMN IF NOT EXISTS billing_mode ENUM('api_balance','reseller_wallet') NOT NULL DEFAULT 'api_balance';
 ALTER TABLE store_api_orders ADD COLUMN IF NOT EXISTS billing_user_id BIGINT UNSIGNED NULL;
@@ -389,9 +412,22 @@ ALTER TABLE store_api_orders ADD COLUMN IF NOT EXISTS billing_transaction_id BIG
 ALTER TABLE store_api_orders ADD COLUMN IF NOT EXISTS balance_before DECIMAL(16,2) NULL;
 ALTER TABLE store_api_orders ADD COLUMN IF NOT EXISTS balance_after DECIMAL(16,2) NULL;
 ALTER TABLE store_api_orders ADD COLUMN IF NOT EXISTS request_fingerprint CHAR(64) NULL;
+ALTER TABLE store_api_orders ADD COLUMN IF NOT EXISTS fulfillment_source VARCHAR(20) NOT NULL DEFAULT 'local' AFTER request_fingerprint;
+ALTER TABLE store_api_orders ADD COLUMN IF NOT EXISTS fulfillment_reason VARCHAR(80) NULL AFTER fulfillment_source;
+ALTER TABLE store_api_orders ADD COLUMN IF NOT EXISTS upstream_order_id BIGINT UNSIGNED NULL AFTER fulfillment_reason;
+ALTER TABLE store_api_orders ADD COLUMN IF NOT EXISTS upstream_reference VARCHAR(190) NULL AFTER upstream_order_id;
+ALTER TABLE store_api_orders ADD COLUMN IF NOT EXISTS upstream_status VARCHAR(40) NULL AFTER upstream_reference;
+ALTER TABLE store_api_orders ADD COLUMN IF NOT EXISTS procurement_cost DECIMAL(16,2) NULL AFTER upstream_status;
+ALTER TABLE store_api_orders ADD COLUMN IF NOT EXISTS refunded_amount DECIMAL(16,2) NULL AFTER procurement_cost;
+ALTER TABLE store_api_orders ADD COLUMN IF NOT EXISTS refunded_at DATETIME NULL AFTER refunded_amount;
+
+ALTER TABLE store_api_order_keys ADD COLUMN IF NOT EXISTS source_type VARCHAR(20) NOT NULL DEFAULT 'local' AFTER order_id;
+ALTER TABLE store_api_order_keys MODIFY COLUMN source_key_id BIGINT UNSIGNED NULL;
+ALTER TABLE store_api_order_keys ADD COLUMN IF NOT EXISTS source_order_id BIGINT UNSIGNED NULL AFTER source_key_id;
 
 ALTER TABLE store_api_clients ADD INDEX IF NOT EXISTS idx_store_api_client_linked_user (linked_user_id, client_type);
 ALTER TABLE store_api_orders ADD INDEX IF NOT EXISTS idx_store_api_order_billing_user (billing_user_id, created_at);
+ALTER TABLE store_api_orders ADD INDEX IF NOT EXISTS idx_store_api_order_upstream (fulfillment_source, upstream_order_id);
 ALTER TABLE store_api_orders ADD INDEX IF NOT EXISTS idx_store_api_order_billing_transaction (billing_transaction_id);
 
 -- IMPORTANT: reseller_wallet also requires transactions.type to accept

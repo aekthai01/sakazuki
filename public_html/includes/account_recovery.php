@@ -735,17 +735,45 @@ function accountRecoveryTransportPlan(string $mode): array
     return ['starttls_587', 'smtps_465'];
 }
 
-function accountRecoveryBuildMimeMessage(array $config, string $recipient, string $subject, string $html, string $text, string $helloHost): string
+function accountRecoverySmtpResponseForLog(array $response): array
+{
+    return [
+        'code' => isset($response['code']) && is_numeric($response['code']) ? (int) $response['code'] : 0,
+        'text' => accountRecoverySanitizeLogText($response['text'] ?? '', 2000),
+        'timed_out' => !empty($response['timed_out']),
+    ];
+}
+
+function accountRecoveryExtractGmailQueueId(string $responseText): string
+{
+    $responseText = trim($responseText);
+    if (preg_match('/\s([A-Za-z0-9][A-Za-z0-9._-]{5,})\s+-\s+gsmtp\s*$/i', $responseText, $m) === 1) {
+        return substr((string) $m[1], 0, 190);
+    }
+    return '';
+}
+
+function accountRecoveryExtractEnhancedStatusCode(string $responseText): string
+{
+    if (preg_match('/^\d{3}\s+([245]\.\d+\.\d+)/', trim($responseText), $m) === 1) {
+        return (string) $m[1];
+    }
+    return '';
+}
+
+function accountRecoveryBuildMimeMessage(array $config, string $recipient, string $subject, string $html, string $text, string $helloHost, array &$messageMetadata = []): string
 {
     $boundary = 'b_' . bin2hex(random_bytes(12));
     if ($text === '') $text = trim(strip_tags(str_replace(['<br>', '<br/>', '<br />'], "\n", $html)));
     $messageIdDomain = preg_replace('/[^a-z0-9.-]/i', '', $helloHost) ?: 'localhost';
+    $messageDate = date(DATE_RFC2822);
+    $messageId = bin2hex(random_bytes(12)) . '@' . $messageIdDomain;
     $headers = [
-        'Date: ' . date(DATE_RFC2822),
+        'Date: ' . $messageDate,
         'From: ' . accountRecoveryEncodeHeader((string) $config['from_name']) . ' <' . $config['username'] . '>',
         'To: <' . $recipient . '>',
         'Subject: ' . accountRecoveryEncodeHeader($subject),
-        'Message-ID: <' . bin2hex(random_bytes(12)) . '@' . $messageIdDomain . '>',
+        'Message-ID: <' . $messageId . '>',
         'MIME-Version: 1.0',
         'Content-Type: multipart/alternative; boundary="' . $boundary . '"',
         'Auto-Submitted: auto-generated',
@@ -757,7 +785,31 @@ function accountRecoveryBuildMimeMessage(array $config, string $recipient, strin
     $body .= chunk_split(base64_encode($html), 76, "\r\n") . "\r\n";
     $body .= '--' . $boundary . "--\r\n";
     $body = preg_replace('/(?m)^\./', '..', $body);
-    return rtrim($body, "\r\n") . "\r\n.\r\n";
+    $wireMessage = rtrim($body, "\r\n") . "\r\n.\r\n";
+
+    $recipientDomain = '';
+    $atPos = strrpos($recipient, '@');
+    if ($atPos !== false) $recipientDomain = strtolower(substr($recipient, $atPos + 1));
+    $messageMetadata = [
+        'message_id' => '<' . $messageId . '>',
+        'date_header' => $messageDate,
+        'sender' => accountRecoveryMaskEmail((string) ($config['username'] ?? '')),
+        'recipient' => accountRecoveryMaskEmail($recipient),
+        'recipient_domain' => $recipientDomain,
+        'mime_type' => 'multipart/alternative',
+        'content_transfer_encoding' => 'base64',
+        'auto_submitted' => 'auto-generated',
+        'has_attachments' => false,
+        'subject_bytes' => strlen($subject),
+        'subject_chars' => function_exists('mb_strlen') ? mb_strlen($subject, 'UTF-8') : null,
+        'text_bytes' => strlen($text),
+        'html_bytes' => strlen($html),
+        'wire_bytes' => strlen($wireMessage),
+        'sensitive_content_logged' => false,
+        'sensitive_content_note' => 'Subject/body/OTP are intentionally not stored in mail diagnostics',
+    ];
+
+    return $wireMessage;
 }
 
 function accountRecoveryExtractTlsDetails($socket): array
@@ -786,6 +838,12 @@ function accountRecoveryExtractTlsDetails($socket): array
 
 function accountRecoverySmtpFailure(string $transport, string $stage, string $errorCode, string $message, int $smtpCode, array $details, float $started): array
 {
+    $durationMs = (int) round((microtime(true) - $started) * 1000);
+    $details['finished_at'] = date('c');
+    if (!isset($details['timings_ms']) || !is_array($details['timings_ms'])) $details['timings_ms'] = [];
+    $details['timings_ms']['total'] = $durationMs;
+    $details['delivery_state'] = 'not_accepted';
+    $details['final_mailbox_delivery_confirmed'] = false;
     return [
         'success' => false,
         'transport' => $transport,
@@ -794,7 +852,7 @@ function accountRecoverySmtpFailure(string $transport, string $stage, string $er
         'smtp_code' => $smtpCode > 0 ? $smtpCode : null,
         'message' => accountRecoverySanitizeLogText($message, 500),
         'details' => $details,
-        'duration_ms' => (int) round((microtime(true) - $started) * 1000),
+        'duration_ms' => $durationMs,
     ];
 }
 
@@ -805,13 +863,28 @@ function accountRecoveryRunSmtpAttempt(array $config, string $transport, string 
     $port = $transport === 'smtps_465' ? 465 : 587;
     $scheme = $transport === 'smtps_465' ? 'ssl' : 'tcp';
     $details = [
+        'attempt_id' => substr(hash('sha256', $started . '|' . $transport . '|' . $recipient . '|' . getmypid()), 0, 16),
+        'started_at' => date('c'),
         'endpoint' => $host . ':' . $port,
+        'transport' => $transport,
+        'configured_mode' => (string) ($config['mode'] ?? ''),
+        'send_message' => $sendMessage,
         'php_version' => PHP_VERSION,
         'openssl' => extension_loaded('openssl'),
         'ca_file' => accountRecoveryFindCaFile(),
         'sender' => accountRecoveryMaskEmail((string) ($config['username'] ?? '')),
+        'recipient' => accountRecoveryMaskEmail($recipient),
         'credential_state' => (string) ($config['credential_state'] ?? ''),
         'password_updated_at' => (string) ($config['password_updated_at'] ?? ''),
+        'connection' => [
+            'host' => $host,
+            'port' => $port,
+            'scheme' => $scheme,
+            'connect_timeout_seconds' => 15,
+            'socket_timeout_seconds' => 20,
+        ],
+        'smtp_trace' => [],
+        'timings_ms' => [],
     ];
 
     if (!function_exists('stream_socket_client')) {
@@ -823,6 +896,7 @@ function accountRecoveryRunSmtpAttempt(array $config, string $transport, string 
 
     $dns = @gethostbynamel($host);
     $details['dns_ipv4'] = is_array($dns) ? array_values(array_unique($dns)) : [];
+    $details['timings_ms']['dns_complete'] = (int) round((microtime(true) - $started) * 1000);
     if (!is_array($dns) || count($dns) < 1) {
         return accountRecoverySmtpFailure($transport, 'dns', 'dns_failed', 'Unable to resolve smtp.gmail.com', 0, $details, $started);
     }
@@ -841,6 +915,10 @@ function accountRecoveryRunSmtpAttempt(array $config, string $transport, string 
         return accountRecoverySmtpFailure($transport, 'connect', 'connect_failed', $errstr !== '' ? $errstr : ($warning !== '' ? $warning : 'SMTP connection failed'), 0, $details, $started);
     }
     stream_set_timeout($socket, 20);
+    $details['connection']['local_socket'] = (string) (stream_socket_get_name($socket, false) ?: '');
+    $details['connection']['remote_socket'] = (string) (stream_socket_get_name($socket, true) ?: '');
+    $details['connection']['connected_at'] = date('c');
+    $details['timings_ms']['connected'] = (int) round((microtime(true) - $started) * 1000);
 
     $close = function () use (&$socket): void {
         if (is_resource($socket)) {
@@ -855,6 +933,8 @@ function accountRecoveryRunSmtpAttempt(array $config, string $transport, string 
         $details['ehlo_host'] = $helloHost;
 
         $response = accountRecoverySmtpCommand($socket, '', [220]);
+        $details['smtp_trace']['greeting'] = accountRecoverySmtpResponseForLog($response);
+        $details['timings_ms']['greeting'] = (int) round((microtime(true) - $started) * 1000);
         if (!$response['success']) {
             $close();
             return accountRecoverySmtpFailure($transport, 'greeting', $response['timed_out'] ? 'smtp_timeout' : 'greeting_failed', $response['text'], (int) $response['code'], $details, $started);
@@ -862,6 +942,8 @@ function accountRecoveryRunSmtpAttempt(array $config, string $transport, string 
 
         $response = accountRecoverySmtpCommand($socket, 'EHLO ' . $helloHost, [250]);
         $details['ehlo_before_tls'] = $response['text'];
+        $details['smtp_trace']['ehlo_before_tls'] = accountRecoverySmtpResponseForLog($response);
+        $details['timings_ms']['ehlo_before_tls'] = (int) round((microtime(true) - $started) * 1000);
         if (!$response['success']) {
             $close();
             return accountRecoverySmtpFailure($transport, 'ehlo', $response['timed_out'] ? 'smtp_timeout' : 'ehlo_failed', $response['text'], (int) $response['code'], $details, $started);
@@ -873,6 +955,8 @@ function accountRecoveryRunSmtpAttempt(array $config, string $transport, string 
                 return accountRecoverySmtpFailure($transport, 'starttls', 'starttls_not_advertised', 'SMTP server did not advertise STARTTLS', (int) $response['code'], $details, $started);
             }
             $response = accountRecoverySmtpCommand($socket, 'STARTTLS', [220]);
+            $details['smtp_trace']['starttls'] = accountRecoverySmtpResponseForLog($response);
+            $details['timings_ms']['starttls_response'] = (int) round((microtime(true) - $started) * 1000);
             if (!$response['success']) {
                 $close();
                 return accountRecoverySmtpFailure($transport, 'starttls', $response['timed_out'] ? 'smtp_timeout' : 'starttls_rejected', $response['text'], (int) $response['code'], $details, $started);
@@ -888,8 +972,11 @@ function accountRecoveryRunSmtpAttempt(array $config, string $transport, string 
                 return accountRecoverySmtpFailure($transport, 'tls', 'tls_failed', $cryptoWarning !== '' ? $cryptoWarning : 'TLS negotiation failed', 0, $details, $started);
             }
             $details = array_merge($details, accountRecoveryExtractTlsDetails($socket));
+            $details['timings_ms']['tls_established'] = (int) round((microtime(true) - $started) * 1000);
             $response = accountRecoverySmtpCommand($socket, 'EHLO ' . $helloHost, [250]);
             $details['ehlo_after_tls'] = $response['text'];
+            $details['smtp_trace']['ehlo_after_tls'] = accountRecoverySmtpResponseForLog($response);
+            $details['timings_ms']['ehlo_after_tls'] = (int) round((microtime(true) - $started) * 1000);
             if (!$response['success']) {
                 $close();
                 return accountRecoverySmtpFailure($transport, 'ehlo_tls', $response['timed_out'] ? 'smtp_timeout' : 'ehlo_after_tls_failed', $response['text'], (int) $response['code'], $details, $started);
@@ -899,16 +986,22 @@ function accountRecoveryRunSmtpAttempt(array $config, string $transport, string 
         }
 
         $response = accountRecoverySmtpCommand($socket, 'AUTH LOGIN', [334]);
+        $details['smtp_trace']['auth_login'] = accountRecoverySmtpResponseForLog($response);
+        $details['timings_ms']['auth_login'] = (int) round((microtime(true) - $started) * 1000);
         if (!$response['success']) {
             $close();
             return accountRecoverySmtpFailure($transport, 'auth', 'auth_method_rejected', $response['text'], (int) $response['code'], $details, $started);
         }
         $response = accountRecoverySmtpCommand($socket, base64_encode($config['username']), [334]);
+        $details['smtp_trace']['auth_username'] = accountRecoverySmtpResponseForLog($response);
+        $details['timings_ms']['auth_username'] = (int) round((microtime(true) - $started) * 1000);
         if (!$response['success']) {
             $close();
             return accountRecoverySmtpFailure($transport, 'auth', 'username_rejected', $response['text'], (int) $response['code'], $details, $started);
         }
         $response = accountRecoverySmtpCommand($socket, base64_encode($config['password']), [235]);
+        $details['smtp_trace']['auth_result'] = accountRecoverySmtpResponseForLog($response);
+        $details['timings_ms']['authenticated'] = (int) round((microtime(true) - $started) * 1000);
         if (!$response['success']) {
             $code = (int) $response['code'];
             $errorCode = $code === 534 ? 'app_password_required' : ($code === 535 ? 'auth_failed' : 'password_rejected');
@@ -931,32 +1024,53 @@ function accountRecoveryRunSmtpAttempt(array $config, string $transport, string 
         }
 
         $response = accountRecoverySmtpCommand($socket, 'MAIL FROM:<' . $config['username'] . '>', [250]);
+        $details['smtp_trace']['mail_from'] = accountRecoverySmtpResponseForLog($response);
+        $details['timings_ms']['mail_from'] = (int) round((microtime(true) - $started) * 1000);
         if (!$response['success']) {
             $close();
             return accountRecoverySmtpFailure($transport, 'sender', 'sender_rejected', $response['text'], (int) $response['code'], $details, $started);
         }
         $response = accountRecoverySmtpCommand($socket, 'RCPT TO:<' . $recipient . '>', [250, 251]);
+        $details['smtp_trace']['rcpt_to'] = accountRecoverySmtpResponseForLog($response);
+        $details['timings_ms']['rcpt_to'] = (int) round((microtime(true) - $started) * 1000);
         if (!$response['success']) {
             $close();
             return accountRecoverySmtpFailure($transport, 'recipient', 'recipient_rejected', $response['text'], (int) $response['code'], $details, $started);
         }
         $response = accountRecoverySmtpCommand($socket, 'DATA', [354]);
+        $details['smtp_trace']['data'] = accountRecoverySmtpResponseForLog($response);
+        $details['timings_ms']['data_ready'] = (int) round((microtime(true) - $started) * 1000);
         if (!$response['success']) {
             $close();
             return accountRecoverySmtpFailure($transport, 'data', 'data_rejected', $response['text'], (int) $response['code'], $details, $started);
         }
 
-        $wireMessage = accountRecoveryBuildMimeMessage($config, $recipient, $subject, $html, $text, $helloHost);
+        $messageMetadata = [];
+        $wireMessage = accountRecoveryBuildMimeMessage($config, $recipient, $subject, $html, $text, $helloHost, $messageMetadata);
+        $details['message'] = $messageMetadata;
+        $details['timings_ms']['message_built'] = (int) round((microtime(true) - $started) * 1000);
         if (!accountRecoverySocketWriteAll($socket, $wireMessage)) {
             $close();
             return accountRecoverySmtpFailure($transport, 'message', 'message_write_failed', 'Unable to write the message body to the SMTP socket', 0, $details, $started);
         }
+        $details['timings_ms']['message_written'] = (int) round((microtime(true) - $started) * 1000);
         $response = accountRecoveryReadSmtpResponse($socket);
+        $details['smtp_trace']['queue_acceptance'] = accountRecoverySmtpResponseForLog($response);
+        $details['timings_ms']['queue_response'] = (int) round((microtime(true) - $started) * 1000);
         if ((int) $response['code'] !== 250) {
             $close();
             return accountRecoverySmtpFailure($transport, 'message', $response['timed_out'] ? 'smtp_timeout' : 'message_rejected', $response['text'], (int) $response['code'], $details, $started);
         }
+        $durationMs = (int) round((microtime(true) - $started) * 1000);
         $details['queue_response'] = $response['text'];
+        $details['gmail_queue_id'] = accountRecoveryExtractGmailQueueId((string) $response['text']);
+        $details['enhanced_status_code'] = accountRecoveryExtractEnhancedStatusCode((string) $response['text']);
+        $details['accepted_at'] = date('c');
+        $details['finished_at'] = $details['accepted_at'];
+        $details['delivery_state'] = 'accepted_by_gmail_smtp';
+        $details['final_mailbox_delivery_confirmed'] = false;
+        $details['delivery_note'] = 'SMTP 250 confirms Gmail accepted the message for processing; it does not prove Inbox/Spam placement or final mailbox delivery';
+        $details['timings_ms']['total'] = $durationMs;
         $close();
         return [
             'success' => true,
@@ -966,7 +1080,7 @@ function accountRecoveryRunSmtpAttempt(array $config, string $transport, string 
             'smtp_code' => 250,
             'message' => 'Message accepted by Gmail SMTP',
             'details' => $details,
-            'duration_ms' => (int) round((microtime(true) - $started) * 1000),
+            'duration_ms' => $durationMs,
         ];
     } catch (Throwable $e) {
         $details['exception'] = get_class($e);
@@ -986,6 +1100,18 @@ function accountRecoveryRecordAttempt(array $result, string $recipient, array $c
     if (!empty($context['credential_source'])) {
         $details['credential_source'] = substr(preg_replace('/[^a-z0-9_.-]/i', '', (string) $context['credential_source']), 0, 40);
     }
+    $requestPath = '';
+    if (isset($_SERVER['REQUEST_URI']) && is_scalar($_SERVER['REQUEST_URI'])) {
+        $parsedPath = parse_url((string) $_SERVER['REQUEST_URI'], PHP_URL_PATH);
+        if (is_string($parsedPath)) $requestPath = accountRecoverySanitizeLogText($parsedPath, 500);
+    }
+    $details['request_context'] = [
+        'event_type' => substr(preg_replace('/[^a-z0-9_.-]/i', '', (string) ($context['event_type'] ?? 'mail')), 0, 40) ?: 'mail',
+        'user_id' => !empty($context['user_id']) ? (int) $context['user_id'] : null,
+        'actor_id' => !empty($context['actor_id']) ? (int) $context['actor_id'] : (isset($_SESSION['user_id']) ? (int) $_SESSION['user_id'] : null),
+        'request_method' => isset($_SERVER['REQUEST_METHOD']) && is_scalar($_SERVER['REQUEST_METHOD']) ? substr((string) $_SERVER['REQUEST_METHOD'], 0, 16) : '',
+        'request_path' => $requestPath,
+    ];
     accountRecoveryLogMailEvent([
         'user_id' => $context['user_id'] ?? null,
         'actor_id' => $context['actor_id'] ?? null,
@@ -1583,6 +1709,12 @@ function accountRecoveryAdminUpdateEmail(int $userId, string $expectedRole, stri
     }
     $newEmail = accountRecoveryNormalizeGmail($newEmail);
     if ($newEmail === '') return ['success' => false, 'message' => 'รองรับเฉพาะอีเมล @gmail.com เท่านั้น'];
+    if (function_exists('accountVerificationEmailBlockState')) {
+        $block = accountVerificationEmailBlockState($newEmail);
+        if (!empty($block['blocked'])) {
+            return ['success' => false, 'message' => 'อีเมลนี้ถูกระงับจากระบบความปลอดภัย'];
+        }
+    }
 
     $check = $conn->prepare('SELECT id FROM users WHERE LOWER(email) = ? AND id <> ? LIMIT 1');
     if (!$check) return ['success' => false, 'message' => 'ไม่สามารถตรวจสอบอีเมลได้'];

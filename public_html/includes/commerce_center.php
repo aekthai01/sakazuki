@@ -1853,6 +1853,15 @@ if (!function_exists('commerceCenterSyncSupplierOrder')) {
             [$sourceId]
         );
         if (!$row) return ['success' => false, 'message' => 'Supplier order not found'];
+        if (strtolower(trim((string)($row['source_kind'] ?? 'storefront'))) === 'store_api'
+            && (int)($row['source_order_id'] ?? 0) > 0) {
+            // Store API is the commercial sale/billing authority. The supplier
+            // child is procurement evidence only and must not become a second
+            // Commerce Center sale. Clear any stale supplier-level failure from
+            // an earlier/partial run, then sync the owning Store API sale only.
+            commerceCenterResolveFailure('supplier_purchase', (string) $sourceId);
+            return commerceCenterSyncStoreApiOrder((int)$row['source_order_id']);
+        }
         $recordId = (string) $sourceId;
         $lock = commerceCenterAcquireLock('supplier_purchase', $recordId);
         if ($lock === null) return ['success' => true, 'skipped' => true];
@@ -2096,9 +2105,10 @@ if (!function_exists('commerceCenterReconcile')) {
             'supplier_purchase' => [
                 'table' => 'supplier_orders',
                 'sql' => "SELECT s.id FROM supplier_orders s LEFT JOIN commerce_orders c ON c.source_site_id=? AND c.source_type='supplier_purchase' AND c.source_record_id=CONVERT(CAST(s.id AS CHAR) USING utf8mb4) COLLATE utf8mb4_unicode_ci
-                          WHERE c.id IS NULL OR c.source_updated_at IS NULL OR s.updated_at>c.source_updated_at
+                          WHERE NOT (LOWER(TRIM(COALESCE(s.source_kind,'storefront')))='store_api' AND COALESCE(s.source_order_id,0)>0)
+                            AND (c.id IS NULL OR c.source_updated_at IS NULL OR s.updated_at>c.source_updated_at
                              OR c.delivery_count<(SELECT COUNT(*) FROM supplier_order_keys k WHERE k.order_id=s.id)
-                             OR EXISTS (SELECT 1 FROM commerce_sync_failures f WHERE f.source_site_id=? AND f.source_type='supplier_purchase' AND f.source_record_id=CONVERT(CAST(s.id AS CHAR) USING utf8mb4) COLLATE utf8mb4_unicode_ci AND f.resolved_at IS NULL)
+                             OR EXISTS (SELECT 1 FROM commerce_sync_failures f WHERE f.source_site_id=? AND f.source_type='supplier_purchase' AND f.source_record_id=CONVERT(CAST(s.id AS CHAR) USING utf8mb4) COLLATE utf8mb4_unicode_ci AND f.resolved_at IS NULL))
                           ORDER BY s.updated_at ASC,s.id ASC LIMIT {$perSource}",
             ],
             'cgo_purchase' => [

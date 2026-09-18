@@ -23,7 +23,7 @@ if (!function_exists('supplierProductsAdminSafeQuery')) {
         if (!is_string($raw) || $raw === '') return '';
         $parsed = [];
         parse_str($raw, $parsed);
-        $allowed = ['connection_id', 'state', 'category', 'q'];
+        $allowed = ['connection_id', 'state', 'category', 'q', 'page', 'per_page'];
         $clean = [];
         foreach ($allowed as $key) {
             if (!isset($parsed[$key]) || !is_scalar($parsed[$key])) continue;
@@ -73,6 +73,9 @@ $connectionId = $getInt('connection_id');
 $state = $getString('state', 'all');
 $category = $getString('category');
 $search = $getString('q');
+$page = max(1, $getInt('page'));
+$perPage = $getInt('per_page');
+if (!in_array($perPage, [25, 50, 100, 200], true)) $perPage = 50;
 
 $allowedStates = [
     'all', 'in_stock', 'out_of_stock', 'mapped', 'unmapped',
@@ -85,6 +88,8 @@ $currentReturnQuery = http_build_query(array_filter([
     'state' => $state !== 'all' ? $state : null,
     'category' => $category !== '' ? $category : null,
     'q' => $search !== '' ? $search : null,
+    'page' => $page > 1 ? $page : null,
+    'per_page' => $perPage !== 50 ? $perPage : null,
 ], static fn($value): bool => $value !== null && $value !== ''), '', '&', PHP_QUERY_RFC3986);
 
 if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
@@ -331,9 +336,18 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
     if ($action === 'link_variant') {
         $localVariantId = max(0, (int) ($_POST['local_variant_id'] ?? 0));
         $sourcePriority = max(-100000, min(100000, (int) ($_POST['source_priority'] ?? 100)));
+        $maxSupplierCostText = isset($_POST['max_supplier_cost']) && is_scalar($_POST['max_supplier_cost'])
+            ? trim((string) $_POST['max_supplier_cost']) : '';
+        $maxSupplierCost = null;
+        if ($maxSupplierCostText !== '') {
+            if (!is_numeric($maxSupplierCostText) || !is_finite((float) $maxSupplierCostText) || (float) $maxSupplierCostText <= 0) {
+                supplierProductsAdminRedirect($connectionId, '', $t('Max Supplier Cost ต้องเป็นตัวเลขมากกว่า 0', 'Max Supplier Cost must be a number greater than zero.'), $returnQuery);
+            }
+            $maxSupplierCost = round((float) $maxSupplierCostText, 2);
+        }
         $product = supplierBridgeGetSupplierProduct($supplierProductId);
         if ($product) $connectionId = (int) $product['connection_id'];
-        $result = supplierBridgeLinkVariantToLocal($supplierProductId, $localVariantId, $sourcePriority);
+        $result = supplierBridgeLinkVariantToLocal($supplierProductId, $localVariantId, $sourcePriority, $maxSupplierCost);
         if (empty($result['success'])) {
             supplierProductsAdminRedirect(
                 $connectionId,
@@ -342,7 +356,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
                 $returnQuery
             );
         }
-        logHistory($adminId, 'supplier_product_variant_link', 'Linked supplier product #' . $supplierProductId . ' to local variant #' . $localVariantId . ' source_priority=' . $sourcePriority);
+        logHistory($adminId, 'supplier_product_variant_link', 'Linked supplier product #' . $supplierProductId . ' to local variant #' . $localVariantId . ' source_priority=' . $sourcePriority . ' max_supplier_cost=' . ($maxSupplierCost === null ? 'none' : number_format($maxSupplierCost, 2, '.', '')));
         supplierProductsAdminRedirect(
             $connectionId,
             $t('เชื่อม API เข้ากับตัวเลือกสินค้าแล้ว ระบบจะใช้ลำดับแหล่งสต็อกใหม่นี้ทันที', 'API product linked to the local variant and the new source priority is active.'),
@@ -459,6 +473,15 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
         );
     }
 
+    if ($action === 'backfill_max_cost') {
+        $result = supplierBridgeBackfillMaxSupplierCosts($connectionId, 2.0);
+        if (empty($result['success'])) {
+            supplierProductsAdminRedirect($connectionId, '', (string) ($result['message'] ?? $t('ตั้ง Max Supplier Cost ไม่สำเร็จ', 'Unable to backfill max supplier costs')), $returnQuery);
+        }
+        logHistory($adminId, 'supplier_max_cost_backfill', 'Backfilled max supplier cost for connection #' . $connectionId . '; updated=' . (int) ($result['updated'] ?? 0));
+        supplierProductsAdminRedirect($connectionId, $t('เติม Max Supplier Cost = ทุน + 2 บาทแล้ว ', 'Filled Max Supplier Cost = cost + 2 for ') . (int) ($result['updated'] ?? 0) . $t(' รายการ', ' mappings'), '', $returnQuery);
+    }
+
     if ($action === 'sync_connection') {
         $result = supplierBridgeRefreshConnection($connectionId, true);
         if (empty($result['success'])) {
@@ -500,18 +523,22 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
 }
 
 $connections = supplierBridgeGetConnections();
-$rows = supplierBridgeGetManagedProducts([
-    'connection_id' => $connectionId,
-    'state' => $state,
-    'category' => $category,
-    'search' => $search,
-], 1000);
-$apiCategories = supplierBridgeGetManagedProductCategories($connectionId);
 $stats = supplierBridgeGetManagedProductStats([
     'connection_id' => $connectionId,
     'category' => $category,
     'search' => $search,
 ]);
+$filteredTotal = (int) ($stats[$state] ?? $stats['total'] ?? 0);
+if ($state === 'all') $filteredTotal = (int) ($stats['total'] ?? 0);
+$totalPages = max(1, (int) ceil($filteredTotal / $perPage));
+if ($page > $totalPages) $page = $totalPages;
+$rows = supplierBridgeGetManagedProducts([
+    'connection_id' => $connectionId,
+    'state' => $state,
+    'category' => $category,
+    'search' => $search,
+], $perPage, ($page - 1) * $perPage);
+$apiCategories = supplierBridgeGetManagedProductCategories($connectionId);
 $categoryMappings = supplierBridgeGetCategoryMappings($connectionId);
 
 $localCatalog = supplierBridgeGetLocalCatalog();
@@ -536,27 +563,32 @@ foreach ($localCatalog as $local) {
             'status' => (string) ($local['product_status'] ?? ''),
         ];
     }
-    $localVariants[] = [
-        'id' => (int) $local['variant_id'],
-        'product_id' => $pid,
-        'name' => (string) $local['product_name'],
-        'duration' => (string) $local['duration'],
-        'categories' => $categories,
-        'category_text' => implode(' · ', $categories),
-        'status' => (string) ($local['variant_status'] ?? ''),
-    ];
+    $variantId = (int) ($local['variant_id'] ?? 0);
+    if ($variantId > 0) {
+        $localVariants[] = [
+            'id' => $variantId,
+            'product_id' => $pid,
+            'name' => (string) $local['product_name'],
+            'duration' => (string) ($local['duration'] ?? ''),
+            'categories' => $categories,
+            'category_text' => implode(' · ', $categories),
+            'status' => (string) ($local['variant_status'] ?? ''),
+        ];
+    }
 }
 $localProducts = array_values($localProducts);
 $localCategories = array_keys($localCategories);
 natcasesort($localCategories);
 $localCategories = array_values($localCategories);
 
-$buildFilterUrl = static function (array $overrides = []) use ($connectionId, $state, $category, $search): string {
+$buildFilterUrl = static function (array $overrides = []) use ($connectionId, $state, $category, $search, $page, $perPage): string {
     $values = array_merge([
         'connection_id' => $connectionId > 0 ? $connectionId : null,
         'state' => $state !== 'all' ? $state : null,
         'category' => $category !== '' ? $category : null,
         'q' => $search !== '' ? $search : null,
+        'page' => $page > 1 ? $page : null,
+        'per_page' => $perPage !== 50 ? $perPage : null,
     ], $overrides);
     $query = http_build_query(array_filter(
         $values,
@@ -785,6 +817,15 @@ $jsonFlags = JSON_UNESCAPED_UNICODE
                 </select>
             </label>
 
+            <label class="text-sm text-gray-300">
+                <?php echo $h($t('จำนวนต่อหน้า', 'Items per page')); ?>
+                <select class="field mt-1" name="per_page">
+                    <?php foreach ([25,50,100,200] as $size): ?>
+                        <option value="<?php echo $size; ?>" <?php echo $perPage === $size ? 'selected' : ''; ?>><?php echo $size; ?></option>
+                    <?php endforeach; ?>
+                </select>
+            </label>
+
             <label class="xl:col-span-2 text-sm text-gray-300">
                 <?php echo $h($t('ค้นหา', 'Search')); ?>
                 <div class="flex gap-2 mt-1">
@@ -801,10 +842,8 @@ $jsonFlags = JSON_UNESCAPED_UNICODE
         <div class="flex flex-wrap items-center justify-between gap-3 border-t border-white/10 pt-4">
             <div class="text-sm text-gray-400">
                 <?php echo $h($t('แสดง ', 'Showing ')); ?><strong class="text-white"><?php echo number_format(count($rows)); ?></strong>
-                <?php echo $h($t(' รายการ', ' items')); ?>
-                <?php if (count($rows) >= 1000): ?>
-                    <span class="text-amber-300 ml-2"><?php echo $h($t('กรุณาใช้ตัวกรองเพื่อลดรายการ', 'Use filters to narrow the result.')); ?></span>
-                <?php endif; ?>
+                <?php echo $h($t(' จาก ', ' of ')); ?><strong class="text-white"><?php echo number_format($filteredTotal); ?></strong>
+                <?php echo $h($t(' รายการ · หน้า ', ' items · page ')); ?><?php echo number_format($page); ?>/<?php echo number_format($totalPages); ?>
             </div>
 
             <?php if ($connectionId > 0): ?>
@@ -825,6 +864,13 @@ $jsonFlags = JSON_UNESCAPED_UNICODE
                         <button class="btn btn-soft" type="submit">
                             <i class="bi bi-arrow-repeat"></i><?php echo $h($t('ดึงรายการและราคาใหม่', 'Refresh catalogue')); ?>
                         </button>
+                    </form>
+                    <form method="post" onsubmit="return confirm('<?php echo $h($t('เติมเฉพาะรายการที่ Max Supplier Cost ยังว่าง โดยใช้ทุนปัจจุบัน + 2 บาท?', 'Fill only missing Max Supplier Cost values with current cost + 2?')); ?>')">
+                        <?php echo csrfField(); ?>
+                        <input type="hidden" name="action" value="backfill_max_cost">
+                        <input type="hidden" name="connection_id" value="<?php echo $connectionId; ?>">
+                        <input type="hidden" name="return_query" value="<?php echo $h($currentReturnQuery); ?>">
+                        <button class="btn btn-soft" type="submit"><i class="bi bi-shield-check"></i><?php echo $h($t('เติม Max Cost +2', 'Fill Max Cost +2')); ?></button>
                     </form>
                     <form method="post">
                         <?php echo csrfField(); ?>
@@ -850,6 +896,13 @@ $jsonFlags = JSON_UNESCAPED_UNICODE
                 </div>
             <?php endif; ?>
         </div>
+        <?php if ($totalPages > 1): ?>
+            <div class="flex items-center justify-center gap-2 border-t border-white/10 pt-4">
+                <a class="btn btn-soft <?php echo $page <= 1 ? 'pointer-events-none opacity-40' : ''; ?>" href="<?php echo $h($buildFilterUrl(['page' => max(1, $page - 1)])); ?>"><i class="bi bi-chevron-left"></i><?php echo $h($t('ก่อนหน้า', 'Previous')); ?></a>
+                <span class="text-sm text-gray-400"><?php echo $h($t('หน้า ', 'Page ')); ?><strong class="text-white"><?php echo $page; ?></strong>/<?php echo $totalPages; ?></span>
+                <a class="btn btn-soft <?php echo $page >= $totalPages ? 'pointer-events-none opacity-40' : ''; ?>" href="<?php echo $h($buildFilterUrl(['page' => min($totalPages, $page + 1)])); ?>"><?php echo $h($t('ถัดไป', 'Next')); ?><i class="bi bi-chevron-right"></i></a>
+            </div>
+        <?php endif; ?>
     </section>
 
     <section class="space-y-4">
@@ -869,45 +922,81 @@ $jsonFlags = JSON_UNESCAPED_UNICODE
             $inStock = (int) $row['remote_stock'] > 0 && empty($row['supplier_removed_at']);
             $rowCategories = isset($row['categories']) && is_array($row['categories']) ? $row['categories'] : [];
         ?>
-            <details class="glass rounded-xl" <?php echo count($rows) === 1 ? 'open' : ''; ?>>
-                <summary class="p-4 md:p-5 flex flex-wrap items-center justify-between gap-4">
-                    <div class="flex items-center gap-3 min-w-0">
-                        <?php if ($connectionId > 0): ?>
-                            <input type="checkbox" class="api-product-select w-4 h-4 shrink-0"
-                                   name="supplier_product_ids[]" value="<?php echo (int) $row['id']; ?>"
-                                   form="bulkPublishForm" onclick="event.stopPropagation()" aria-label="<?php echo $h($t('เลือกรายการนี้', 'Select this item')); ?>">
-                        <?php endif; ?>
-                        <?php if (!empty($row['image_url'])): ?>
-                            <img src="<?php echo $h($row['image_url']); ?>" alt=""
-                                 class="w-14 h-14 rounded-lg object-cover bg-black/30" loading="lazy">
-                        <?php endif; ?>
-                        <div class="min-w-0">
-                            <div class="font-bold text-lg break-words"><?php echo $h($row['name']); ?></div>
-                            <div class="text-sm text-gray-400">
-                                <?php echo $h($row['duration']); ?> · <?php echo $h($row['connection_name']); ?> · <?php echo $h($row['remote_product_id']); ?>
+<details class="glass rounded-xl overflow-hidden" <?php echo count($rows) === 1 ? 'open' : ''; ?>>
+                <summary class="p-3.5 sm:p-4 flex items-start gap-3 cursor-pointer hover:bg-white/[0.02] transition-colors">
+                    <?php if ($connectionId > 0): ?>
+                        <input type="checkbox" class="api-product-select w-4 h-4 mt-1 shrink-0 rounded cursor-pointer accent-violet-600"
+                               name="supplier_product_ids[]" value="<?php echo (int) $row['id']; ?>"
+                               form="bulkPublishForm" onclick="event.stopPropagation()" aria-label="<?php echo $h($t('เลือกรายการนี้', 'Select this item')); ?>">
+                    <?php endif; ?>
+
+                    <?php if (!empty($row['image_url'])): ?>
+                        <img src="<?php echo $h($row['image_url']); ?>" alt=""
+                             class="w-12 h-12 sm:w-14 sm:h-14 rounded-xl object-cover bg-black/40 border border-white/10 shrink-0" loading="lazy">
+                    <?php endif; ?>
+
+                    <div class="min-w-0 flex-1 space-y-1.5">
+                        <!-- ชื่อสินค้า -->
+                        <div class="font-bold text-sm sm:text-base text-white tracking-wide break-words">
+                            <?php echo $h($row['name']); ?>
+                        </div>
+
+                        <!-- รายละเอียด: ระยะเวลา · ชื่อ Supplier · Variant ID -->
+                        <div class="text-xs text-gray-400 break-words">
+                            <?php echo $h($row['duration']); ?> · <?php echo $h($row['connection_name']); ?> · <?php echo $h($row['remote_product_id']); ?>
+                        </div>
+
+                        <!-- หมวดหมู่ -->
+                        <?php if ($rowCategories): ?>
+                            <div class="flex flex-wrap gap-1 pt-0.5">
+                                <?php foreach ($rowCategories as $rowCategory): ?>
+                                    <span class="inline-block px-2 py-0.5 rounded text-[11px] bg-white/5 border border-white/10 text-gray-400">
+                                        <?php echo $h($rowCategory); ?>
+                                    </span>
+                                <?php endforeach; ?>
                             </div>
-                            <?php if ($rowCategories): ?>
-                                <div class="flex flex-wrap gap-1 mt-2">
-                                    <?php foreach ($rowCategories as $rowCategory): ?>
-                                        <span class="badge bg-white/10 text-gray-300"><?php echo $h($rowCategory); ?></span>
-                                    <?php endforeach; ?>
-                                </div>
+                        <?php endif; ?>
+
+                        <!-- ป้ายสถานะ 3 ป้าย (เรียงตามรูปภาพเป๊ะๆ) -->
+                        <div class="flex flex-wrap items-center gap-1.5 pt-1">
+                            <!-- 1. สถานะเปิด/ปิดขาย -->
+                            <?php if ((int) $row['enabled'] === 1): ?>
+                                <span class="badge border border-emerald-500/30 bg-emerald-500/10 text-emerald-300 font-medium px-2.5 py-1">
+                                    <?php echo $h($t('เปิดขาย', 'Enabled')); ?>
+                                </span>
+                            <?php else: ?>
+                                <span class="badge border border-gray-500/30 bg-gray-500/10 text-gray-400 font-medium px-2.5 py-1">
+                                    <?php echo $h($t('ปิดขาย', 'Disabled')); ?>
+                                </span>
+                            <?php endif; ?>
+
+                            <!-- 2. สถานะการเชื่อม -->
+                            <?php if ($mapped): ?>
+                                <span class="badge border border-sky-500/30 bg-sky-500/10 text-sky-300 font-medium px-2.5 py-1">
+                                    <?php echo $h($t('รวมหน้าหลักแล้ว', 'Mapped')); ?>
+                                </span>
+                            <?php else: ?>
+                                <span class="badge border border-amber-500/30 bg-amber-500/10 text-amber-300 font-medium px-2.5 py-1">
+                                    <?php echo $h($t('ยังไม่รวม', 'Unmapped')); ?>
+                                </span>
+                            <?php endif; ?>
+
+                            <!-- 3. สถานะสต็อก -->
+                            <?php if ($inStock): ?>
+                                <span class="badge border border-emerald-500/30 bg-emerald-500/10 text-emerald-300 font-medium px-2.5 py-1 flex items-center gap-1">
+                                    <i class="bi bi-check-circle"></i>
+                                    <span><?php echo $h($t('มีสต็อก', 'In stock')); ?> <?php echo (int) $row['remote_stock']; ?></span>
+                                </span>
+                            <?php else: ?>
+                                <span class="badge border border-red-500/30 bg-red-500/10 text-red-300 font-medium px-2.5 py-1 flex items-center gap-1">
+                                    <i class="bi bi-x-circle"></i>
+                                    <span><?php echo $h($t('หมดสต็อก', 'Out of stock')); ?></span>
+                                </span>
                             <?php endif; ?>
                         </div>
                     </div>
-                    <div class="flex flex-wrap items-center gap-2">
-                        <span class="badge <?php echo (int) $row['enabled'] === 1 ? 'bg-emerald-500/20 text-emerald-200' : 'bg-red-500/20 text-red-200'; ?>">
-                            <?php echo $h((int) $row['enabled'] === 1 ? $t('เปิดขาย', 'Enabled') : $t('ปิดขาย', 'Disabled')); ?>
-                        </span>
-                        <span class="badge <?php echo $mapped ? 'bg-sky-500/20 text-sky-200' : 'bg-amber-500/20 text-amber-200'; ?>">
-                            <?php echo $h($mapped ? $t('รวมหน้าหลักแล้ว', 'Mapped') : $t('ยังไม่รวม', 'Unmapped')); ?>
-                        </span>
-                        <span class="badge <?php echo $inStock ? 'bg-green-500/20 text-green-200' : 'bg-gray-500/20 text-gray-300'; ?>">
-                            <i class="bi <?php echo $inStock ? 'bi-check-circle' : 'bi-x-circle'; ?> mr-1"></i>
-                            <?php echo $h($inStock ? $t('มีสต็อก ', 'In stock ') : $t('หมดสต็อก ', 'Out of stock ')); ?><?php echo (int) $row['remote_stock']; ?>
-                        </span>
-                    </div>
                 </summary>
+
 
                 <div class="border-t border-white/10 p-4 md:p-5 space-y-5">
                     <div class="grid grid-cols-2 md:grid-cols-6 gap-3 text-sm">
@@ -925,13 +1014,13 @@ $jsonFlags = JSON_UNESCAPED_UNICODE
                         </div>
                         <div>
                             <div class="text-gray-500"><?php echo $h($t('ราคาผู้ใช้เว็บนี้', 'Local user price')); ?></div>
-                            <div class="<?php echo $localUser !== null && $localUser < $cost ? 'text-red-300' : 'text-emerald-300'; ?>">
+                            <div class="<?php echo $localUser === null ? 'text-gray-400' : ($localUser < $cost ? 'text-red-300' : 'text-emerald-300'); ?>">
                                 <?php echo $localUser !== null ? $h(number_format($localUser, 2)) : '-'; ?>
                             </div>
                         </div>
                         <div>
                             <div class="text-gray-500"><?php echo $h($t('ราคาตัวแทนเว็บนี้', 'Local reseller price')); ?></div>
-                            <div class="<?php echo $localReseller !== null && $localReseller < $cost ? 'text-red-300' : 'text-emerald-300'; ?>">
+                            <div class="<?php echo $localReseller === null ? 'text-gray-400' : ($localReseller < $cost ? 'text-red-300' : 'text-emerald-300'); ?>">
                                 <?php echo $localReseller !== null ? $h(number_format($localReseller, 2)) : '-'; ?>
                             </div>
                         </div>
@@ -1100,6 +1189,7 @@ $jsonFlags = JSON_UNESCAPED_UNICODE
                                         Product #<?php echo (int) $row['local_product_id']; ?> ·
                                         Variant #<?php echo (int) $row['local_variant_id']; ?> ·
                                         <?php echo $h($t('ลำดับแหล่งสต็อก ', 'Source priority ')); ?><?php echo (int) ($row['source_priority'] ?? 100); ?> ·
+                                        <?php echo $h($t('เพดานทุน ', 'Max cost ')); ?><?php echo $row['max_supplier_cost'] !== null ? $h(number_format((float) $row['max_supplier_cost'], 2)) : $h($t('ยังไม่ตั้ง', 'not set')); ?> ·
                                         <?php echo $h($t('ลำดับ API ', 'Connection priority ')); ?><?php echo (int) ($row['connection_priority'] ?? 100); ?> ·
                                         <?php echo $h((int) $row['sync_duration'] === 1 ? $t('ซิงก์ชื่อระยะเวลา', 'Duration synced') : $t('คงชื่อระยะเวลาเดิม', 'Local duration preserved')); ?>
                                     </div>
@@ -1173,8 +1263,11 @@ $jsonFlags = JSON_UNESCAPED_UNICODE
                                 </div>
                             <?php endif; ?>
 
+                            <!-- ฟอร์มรวมกลุ่มสินค้าเข้ากับสินค้าหลัก -->
                             <form method="post" class="space-y-3 catalog-picker"
                                   data-picker-kind="product"
+                                  data-supplier-name="<?php echo $h($row['name']); ?>"
+                                  data-supplier-duration="<?php echo $h($row['duration']); ?>"
                                   data-selected="<?php echo (int) ($row['local_product_id'] ?? 0); ?>">
                                 <?php echo csrfField(); ?>
                                 <input type="hidden" name="action" value="map_group">
@@ -1211,9 +1304,13 @@ $jsonFlags = JSON_UNESCAPED_UNICODE
                                 </button>
                             </form>
 
+                            <!-- ฟอร์มเชื่อมตัวเลือกสินค้าตรง (3 ขั้นตอน: กรองหมวดหมู่ -> เลือกสินค้า -> เลือกระยะเวลา) -->
                             <form method="post" class="space-y-3 catalog-picker"
                                   data-picker-kind="variant"
-                                  data-selected="<?php echo (int) ($row['local_variant_id'] ?? 0); ?>">
+                                  data-supplier-name="<?php echo $h($row['name']); ?>"
+                                  data-supplier-duration="<?php echo $h($row['duration']); ?>"
+                                  data-selected="<?php echo (int) ($row['local_variant_id'] ?? 0); ?>"
+                                  data-group-product-id="<?php echo (int) ($row['group_local_product_id'] ?? 0); ?>">
                                 <?php echo csrfField(); ?>
                                 <input type="hidden" name="action" value="link_variant">
                                 <input type="hidden" name="connection_id" value="<?php echo (int) $row['connection_id']; ?>">
@@ -1222,7 +1319,7 @@ $jsonFlags = JSON_UNESCAPED_UNICODE
 
                                 <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
                                     <label class="text-xs text-gray-400">
-                                        <?php echo $h($t('หมวดหมู่ตัวเลือกเดิม', 'Local category')); ?>
+                                        <span class="text-gray-300 font-semibold"><?php echo $h($t('1. กรองตามหมวดหมู่', '1. Filter by category')); ?></span>
                                         <select class="field mt-1 picker-category">
                                             <option value=""><?php echo $h($t('ทุกหมวดหมู่', 'All categories')); ?></option>
                                             <?php foreach ($localCategories as $localCategory): ?>
@@ -1231,22 +1328,37 @@ $jsonFlags = JSON_UNESCAPED_UNICODE
                                         </select>
                                     </label>
                                     <label class="text-xs text-gray-400">
-                                        <?php echo $h($t('ค้นหาชื่อหรือระยะเวลา', 'Search product or duration')); ?>
+                                        <span class="text-gray-300 font-semibold"><?php echo $h($t('หรือค้นหาชื่อสินค้า', 'Or search product name')); ?></span>
                                         <input class="field mt-1 picker-search" type="search"
-                                               placeholder="<?php echo $h($t('ชื่อสินค้า ระยะเวลา หรือ Variant ID', 'Product, duration or variant ID')); ?>">
+                                               placeholder="<?php echo $h($t('พิมพ์ชื่อสินค้า หรือ ID', 'Type product name or ID')); ?>">
                                     </label>
                                 </div>
 
-                                <label class="text-xs text-gray-400">
-                                    <?php echo $h($t('ตัวเลือกที่ต้องการเชื่อมตรง', 'Target local variant')); ?>
-                                    <select class="field mt-1 picker-select" name="local_variant_id" required>
-                                        <option value=""><?php echo $h($t('เปิดช่องค้นหาเพื่อโหลดรายการ', 'Focus the search fields to load variants')); ?></option>
+                                <label class="text-xs text-gray-400 block">
+                                    <span class="text-sky-300 font-semibold"><?php echo $h($t('2. เลือกสินค้าหลัก', '2. Select local product')); ?></span>
+                                    <select class="field mt-1 picker-product-filter" required>
+                                        <option value=""><?php echo $h($t('-- กรุณาเลือกสินค้าหลัก --', '-- Select local product --')); ?></option>
                                     </select>
                                 </label>
-                                <label class="text-xs text-gray-400">
+
+                                <label class="text-xs text-gray-400 block">
+                                    <span class="text-emerald-300 font-semibold"><?php echo $h($t('3. เลือกรูปแบบ / ระยะเวลา', '3. Select variant / duration')); ?></span>
+                                    <select class="field mt-1 picker-select" name="local_variant_id" required disabled>
+                                        <option value=""><?php echo $h($t('-- กรุณาเลือกสินค้าหลักด้านบนก่อน --', '-- Select local product above first --')); ?></option>
+                                    </select>
+                                </label>
+
+                                <label class="text-xs text-gray-400 block">
                                     <?php echo $h($t('ลำดับแหล่งสต็อก (เลขน้อยลองก่อน)', 'Source priority (lower is tried first)')); ?>
                                     <input class="field mt-1" type="number" name="source_priority" min="-100000" max="100000"
                                            value="<?php echo (int) ($row['source_priority'] ?? 100); ?>" required>
+                                </label>
+                                <label class="text-xs text-gray-400 block">
+                                    <?php echo $h($t('Max Supplier Cost ต่อชิ้น', 'Max Supplier Cost per unit')); ?>
+                                    <input class="field mt-1" type="number" name="max_supplier_cost" step="0.01" min="0.01"
+                                           value="<?php echo $row['max_supplier_cost'] !== null ? $h(number_format((float) $row['max_supplier_cost'], 2, '.', '')) : ''; ?>"
+                                           placeholder="<?php echo $h($t('ค่าเริ่มต้น = ทุน + 2 บาท', 'Default = cost + 2')); ?>">
+                                    <span class="block mt-1 text-[11px] text-gray-500"><?php echo $h($t('ก่อนซื้อระบบจะอ่านราคาปัจจุบันอีกครั้ง และจะบล็อกถ้าเกินเพดานนี้', 'The current supplier price is re-read before purchase and blocked if it exceeds this ceiling.')); ?></span>
                                 </label>
                                 <div class="picker-count text-xs text-gray-500"></div>
                                 <button class="btn btn-soft w-full" type="submit">
@@ -1293,65 +1405,147 @@ function normalizePickerText(value) {
     return String(value || '').toLocaleLowerCase().trim();
 }
 
-function pickerOptionLabel(item, kind) {
-    const category = Array.isArray(item.categories) && item.categories.length
-        ? '[' + item.categories.join(' / ') + '] '
-        : '';
-    if (kind === 'variant') {
-        return category + '#' + item.product_id + '/' + item.id + ' ' + item.name + ' - ' + item.duration;
-    }
-    return category + '#' + item.id + ' ' + item.name;
-}
-
 function renderCatalogPicker(root) {
     const kind = root.dataset.pickerKind === 'variant' ? 'variant' : 'product';
-    const data = kind === 'variant' ? localVariantOptions : localProductOptions;
     const category = root.querySelector('.picker-category')?.value || '';
     const search = normalizePickerText(root.querySelector('.picker-search')?.value || '');
-    const select = root.querySelector('.picker-select');
-    const count = root.querySelector('.picker-count');
-    if (!select) return;
+    const supplierName = normalizePickerText(root.dataset.supplierName || '');
 
-    const previous = select.value || root.dataset.selected || '';
-    const filtered = data.filter((item) => {
+    // กรณีฟอร์มรวมกลุ่มสินค้า (Map Group)
+    if (kind === 'product') {
+        const select = root.querySelector('.picker-select');
+        const count = root.querySelector('.picker-count');
+        if (!select) return;
+        const previous = select.value || root.dataset.selected || '';
+
+        const filtered = localProductOptions.filter((item) => {
+            const categories = Array.isArray(item.categories) ? item.categories : [];
+            if (category && !categories.includes(category)) return false;
+            if (!search) return true;
+            const haystack = normalizePickerText([item.id, item.name, categories.join(' ')].join(' '));
+            return haystack.includes(search);
+        });
+
+        filtered.sort((a, b) => {
+            const aName = normalizePickerText(a.name);
+            const bName = normalizePickerText(b.name);
+            const score = (name) => (name === supplierName ? 4 : (supplierName && (name.includes(supplierName) || supplierName.includes(name)) ? 2 : 0));
+            return score(bName) - score(aName) || String(a.name).localeCompare(String(b.name), undefined, {numeric:true, sensitivity:'base'});
+        });
+
+        select.replaceChildren();
+        const placeholder = document.createElement('option');
+        placeholder.value = '';
+        placeholder.textContent = filtered.length ? pickerLabels.selectProduct : pickerLabels.empty;
+        select.appendChild(placeholder);
+
+        filtered.forEach((item) => {
+            const option = document.createElement('option');
+            option.value = String(item.id);
+            const catPrefix = item.categories?.length ? '[' + item.categories.join('/') + '] ' : '';
+            option.textContent = `${catPrefix}#${item.id} ${item.name}`;
+            if (String(item.id) === String(previous)) option.selected = true;
+            select.appendChild(option);
+        });
+
+        if (count) count.textContent = pickerLabels.showing + filtered.length + pickerLabels.items;
+        return;
+    }
+
+    // กรณีฟอร์มเชื่อมตัวเลือก (Link Variant) -> ระบบ 3 ขั้นตอน
+    const productFilter = root.querySelector('.picker-product-filter');
+    const variantSelect = root.querySelector('.picker-select');
+    const count = root.querySelector('.picker-count');
+    if (!productFilter || !variantSelect) return;
+
+    let selectedVariantId = variantSelect.value || root.dataset.selected || '';
+    let currentProductId = productFilter.value;
+
+    if (!currentProductId && selectedVariantId) {
+        const matchVariant = localVariantOptions.find(v => String(v.id) === String(selectedVariantId));
+        if (matchVariant) currentProductId = String(matchVariant.product_id);
+    }
+    if (!currentProductId && root.dataset.groupProductId && root.dataset.groupProductId !== '0') {
+        currentProductId = String(root.dataset.groupProductId);
+    }
+
+    const filteredProducts = localProductOptions.filter((item) => {
         const categories = Array.isArray(item.categories) ? item.categories : [];
         if (category && !categories.includes(category)) return false;
         if (!search) return true;
-        const haystack = normalizePickerText([
-            item.id,
-            item.product_id || '',
-            item.name,
-            item.duration || '',
-            categories.join(' '),
-        ].join(' '));
+        const haystack = normalizePickerText([item.id, item.name, categories.join(' ')].join(' '));
         return haystack.includes(search);
     });
 
-    select.replaceChildren();
-    const placeholder = document.createElement('option');
-    placeholder.value = '';
-    placeholder.textContent = filtered.length
-        ? (kind === 'variant' ? pickerLabels.selectVariant : pickerLabels.selectProduct)
-        : pickerLabels.empty;
-    select.appendChild(placeholder);
-
-    filtered.forEach((item) => {
-        const option = document.createElement('option');
-        option.value = String(item.id);
-        option.textContent = pickerOptionLabel(item, kind);
-        if (String(item.id) === String(previous)) option.selected = true;
-        select.appendChild(option);
+    filteredProducts.sort((a, b) => {
+        const aName = normalizePickerText(a.name);
+        const bName = normalizePickerText(b.name);
+        const score = (name) => (name === supplierName ? 4 : (supplierName && (name.includes(supplierName) || supplierName.includes(name)) ? 2 : 0));
+        return score(bName) - score(aName) || String(a.name).localeCompare(String(b.name), undefined, {numeric:true, sensitivity:'base'});
     });
 
-    if (count) count.textContent = pickerLabels.showing + filtered.length + pickerLabels.items;
-    root.dataset.initialized = '1';
+    productFilter.replaceChildren();
+    const prodPlaceholder = document.createElement('option');
+    prodPlaceholder.value = '';
+    prodPlaceholder.textContent = filteredProducts.length ? '-- 2. เลือกสินค้าหลัก --' : pickerLabels.empty;
+    productFilter.appendChild(prodPlaceholder);
+
+    filteredProducts.forEach((prod) => {
+        const opt = document.createElement('option');
+        opt.value = String(prod.id);
+        const catPrefix = prod.categories?.length ? '[' + prod.categories.join('/') + '] ' : '';
+        opt.textContent = `${catPrefix}#${prod.id} ${prod.name}`;
+        if (String(prod.id) === String(currentProductId)) opt.selected = true;
+        productFilter.appendChild(opt);
+    });
+
+    variantSelect.replaceChildren();
+
+    if (!currentProductId) {
+        variantSelect.disabled = true;
+        const opt = document.createElement('option');
+        opt.value = '';
+        opt.textContent = '-- กรุณาเลือกสินค้าหลักด้านบนก่อน --';
+        variantSelect.appendChild(opt);
+        if (count) count.textContent = pickerLabels.showing + filteredProducts.length + ' สินค้าหลัก';
+        return;
+    }
+
+    variantSelect.disabled = false;
+    const variantsOfProduct = localVariantOptions.filter(v => String(v.product_id) === String(currentProductId));
+
+    const varPlaceholder = document.createElement('option');
+    varPlaceholder.value = '';
+    varPlaceholder.textContent = variantsOfProduct.length ? '-- 3. เลือกรูปแบบ / ระยะเวลา --' : 'สินค้านี้ยังไม่มีรูปแบบ';
+    variantSelect.appendChild(varPlaceholder);
+
+    variantsOfProduct.forEach((v) => {
+        const opt = document.createElement('option');
+        opt.value = String(v.id);
+        const durationName = v.duration ? v.duration : 'ค่าเริ่มต้น';
+        opt.textContent = `${durationName} (รหัส #${v.id})`;
+        if (String(v.id) === String(selectedVariantId)) opt.selected = true;
+        variantSelect.appendChild(opt);
+    });
+
+    if (count) count.textContent = pickerLabels.showing + variantsOfProduct.length + ' รูปแบบของสินค้านี้';
 }
 
 function initializePicker(root) {
     if (!root || root.dataset.initialized === '1') return;
     renderCatalogPicker(root);
-    root.querySelector('.picker-category')?.addEventListener('change', () => renderCatalogPicker(root));
-    root.querySelector('.picker-search')?.addEventListener('input', () => renderCatalogPicker(root));
+    root.querySelector('.picker-category')?.addEventListener('change', () => {
+        const prodFilter = root.querySelector('.picker-product-filter');
+        if (prodFilter) prodFilter.value = '';
+        renderCatalogPicker(root);
+    });
+    root.querySelector('.picker-product-filter')?.addEventListener('change', () => {
+        renderCatalogPicker(root);
+    });
+    root.querySelector('.picker-search')?.addEventListener('input', () => {
+        renderCatalogPicker(root);
+    });
+    root.dataset.initialized = '1';
 }
 
 document.addEventListener('focusin', (event) => {
@@ -1370,31 +1564,30 @@ document.addEventListener('submit', (event) => {
     if (!root) return;
     initializePicker(root);
     const select = root.querySelector('.picker-select');
-    if (select && !select.value) {
+    if (select && (!select.value || select.disabled)) {
         event.preventDefault();
         select.focus();
     }
 });
 
+// Event Delegation สำหรับปุ่มเลือกทั้งหมดและฟอร์มเผยแพร่หมู่ (รองรับ instant-filter)
+document.addEventListener('click', (event) => {
+    const btn = event.target.closest('#selectVisibleApiProducts');
+    if (!btn) return;
+    const boxes = Array.from(document.querySelectorAll('.api-product-select'));
+    if (!boxes.length) return;
+    const shouldCheck = !boxes.every((box) => box.checked);
+    boxes.forEach((box) => { box.checked = shouldCheck; });
+});
 
-const bulkPublishForm = document.getElementById('bulkPublishForm');
-const selectVisibleApiProducts = document.getElementById('selectVisibleApiProducts');
-if (selectVisibleApiProducts) {
-    selectVisibleApiProducts.addEventListener('click', () => {
-        const boxes = Array.from(document.querySelectorAll('.api-product-select'));
-        if (!boxes.length) return;
-        const shouldCheck = !boxes.every((box) => box.checked);
-        boxes.forEach((box) => { box.checked = shouldCheck; });
-    });
-}
-if (bulkPublishForm) {
-    bulkPublishForm.addEventListener('submit', (event) => {
-        if (!document.querySelector('.api-product-select:checked')) {
-            event.preventDefault();
-            window.alert(<?php echo json_encode($t('กรุณาเลือกรายการอย่างน้อย 1 รายการ', 'Select at least one product.'), $jsonFlags); ?>);
-        }
-    });
-}
+document.addEventListener('submit', (event) => {
+    const form = event.target.closest('#bulkPublishForm');
+    if (!form) return;
+    if (!document.querySelector('.api-product-select:checked')) {
+        event.preventDefault();
+        window.alert(<?php echo json_encode($t('กรุณาเลือกรายการอย่างน้อย 1 รายการ', 'Select at least one product.'), $jsonFlags); ?>);
+    }
+});
 </script>
 <script src="../assets/js/instant-filter.js?v=3.0"></script>
 </body>

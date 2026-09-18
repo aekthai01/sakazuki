@@ -275,6 +275,11 @@ if (!function_exists('commerceConsistencyRunRemoteSource')) {
             ? "COALESCE(o.completed_at," . (!empty($orderCols['created_at']) ? 'o.created_at' : "''") . ')'
             : (!empty($orderCols['created_at']) ? 'o.created_at' : "''");
         $externalExpr = !empty($orderCols['external_ref']) ? "COALESCE(o.external_ref,'')" : "''";
+        $scopeCondition = '1=1';
+        if (!empty($config['exclude_store_api_procurement'])
+            && !empty($orderCols['source_kind']) && !empty($orderCols['source_order_id'])) {
+            $scopeCondition = "NOT (LOWER(TRIM(COALESCE(o.source_kind,'storefront')))='store_api' AND COALESCE(o.source_order_id,0)>0)";
+        }
 
         commerceConsistencyAddCheck($report, [
             'code' => $source . '_invalid_transaction_link',
@@ -285,8 +290,8 @@ if (!function_exists('commerceConsistencyRunRemoteSource')) {
             'help_en' => 'A successful order must link to a completed transaction owned by the same user.',
             'skip' => !$ready,
             'skip_reason' => 'orders_keys_or_transactions_schema_unavailable',
-            'count_sql' => "SELECT COUNT(*) AS c FROM `{$orders}` o LEFT JOIN transactions t ON t.id={$txExpr} WHERE {$success} AND ({$txExpr}<1 OR t.id IS NULL OR t.user_id<>o.user_id OR LOWER(TRIM(COALESCE(t.status,'')))<>'completed')",
-            'rows_sql' => "SELECT o.id AS order_id,{$txExpr} AS transaction_id,o.user_id,o.status AS order_status,COALESCE(t.user_id,0) AS transaction_user_id,COALESCE(t.status,'') AS transaction_status,COALESCE(t.type,'') AS transaction_type,{$quantityExpr} AS quantity,{$keyCount} AS key_count,{$externalExpr} AS external_ref,{$timeExpr} AS order_time FROM `{$orders}` o LEFT JOIN transactions t ON t.id={$txExpr} WHERE {$success} AND ({$txExpr}<1 OR t.id IS NULL OR t.user_id<>o.user_id OR LOWER(TRIM(COALESCE(t.status,'')))<>'completed') ORDER BY o.id DESC LIMIT {$sampleLimit}",
+            'count_sql' => "SELECT COUNT(*) AS c FROM `{$orders}` o LEFT JOIN transactions t ON t.id={$txExpr} WHERE {$scopeCondition} AND {$success} AND ({$txExpr}<1 OR t.id IS NULL OR t.user_id<>o.user_id OR LOWER(TRIM(COALESCE(t.status,'')))<>'completed')",
+            'rows_sql' => "SELECT o.id AS order_id,{$txExpr} AS transaction_id,o.user_id,o.status AS order_status,COALESCE(t.user_id,0) AS transaction_user_id,COALESCE(t.status,'') AS transaction_status,COALESCE(t.type,'') AS transaction_type,{$quantityExpr} AS quantity,{$keyCount} AS key_count,{$externalExpr} AS external_ref,{$timeExpr} AS order_time FROM `{$orders}` o LEFT JOIN transactions t ON t.id={$txExpr} WHERE {$scopeCondition} AND {$success} AND ({$txExpr}<1 OR t.id IS NULL OR t.user_id<>o.user_id OR LOWER(TRIM(COALESCE(t.status,'')))<>'completed') ORDER BY o.id DESC LIMIT {$sampleLimit}",
         ]);
 
         commerceConsistencyAddCheck($report, [
@@ -298,8 +303,8 @@ if (!function_exists('commerceConsistencyRunRemoteSource')) {
             'help_en' => 'The link can still work, but an unexpected transaction type can confuse legacy reports and fallback lookups.',
             'skip' => !$ready || $legacyType === '',
             'skip_reason' => 'transaction_type_unavailable',
-            'count_sql' => "SELECT COUNT(*) AS c FROM `{$orders}` o JOIN transactions t ON t.id={$txExpr} WHERE {$success} AND LOWER(TRIM(COALESCE(t.type,'')))<>'{$legacyType}'",
-            'rows_sql' => "SELECT o.id AS order_id,{$txExpr} AS transaction_id,o.user_id,o.status AS order_status,COALESCE(t.type,'') AS transaction_type,COALESCE(t.status,'') AS transaction_status,{$externalExpr} AS external_ref,{$timeExpr} AS order_time FROM `{$orders}` o JOIN transactions t ON t.id={$txExpr} WHERE {$success} AND LOWER(TRIM(COALESCE(t.type,'')))<>'{$legacyType}' ORDER BY o.id DESC LIMIT {$sampleLimit}",
+            'count_sql' => "SELECT COUNT(*) AS c FROM `{$orders}` o JOIN transactions t ON t.id={$txExpr} WHERE {$scopeCondition} AND {$success} AND LOWER(TRIM(COALESCE(t.type,'')))<>'{$legacyType}'",
+            'rows_sql' => "SELECT o.id AS order_id,{$txExpr} AS transaction_id,o.user_id,o.status AS order_status,COALESCE(t.type,'') AS transaction_type,COALESCE(t.status,'') AS transaction_status,{$externalExpr} AS external_ref,{$timeExpr} AS order_time FROM `{$orders}` o JOIN transactions t ON t.id={$txExpr} WHERE {$scopeCondition} AND {$success} AND LOWER(TRIM(COALESCE(t.type,'')))<>'{$legacyType}' ORDER BY o.id DESC LIMIT {$sampleLimit}",
         ]);
 
         commerceConsistencyAddCheck($report, [
@@ -311,8 +316,8 @@ if (!function_exists('commerceConsistencyRunRemoteSource')) {
             'help_en' => 'The charged amount should match order total_price_base. A difference above 0.01 can corrupt history and profit reports.',
             'skip' => !$ready || empty($orderCols['total_price_base']) || empty($txCols['amount']),
             'skip_reason' => 'order_or_transaction_amount_unavailable',
-            'count_sql' => "SELECT COUNT(*) AS c FROM `{$orders}` o JOIN transactions t ON t.id={$txExpr} WHERE {$success} AND ABS(COALESCE(t.amount,0)-COALESCE(o.total_price_base,0))>0.01",
-            'rows_sql' => "SELECT o.id AS order_id,{$txExpr} AS transaction_id,o.user_id,o.status AS order_status,COALESCE(o.total_price_base,0) AS order_total,COALESCE(t.amount,0) AS transaction_amount,ROUND(COALESCE(t.amount,0)-COALESCE(o.total_price_base,0),2) AS difference,{$externalExpr} AS external_ref,{$timeExpr} AS order_time FROM `{$orders}` o JOIN transactions t ON t.id={$txExpr} WHERE {$success} AND ABS(COALESCE(t.amount,0)-COALESCE(o.total_price_base,0))>0.01 ORDER BY o.id DESC LIMIT {$sampleLimit}",
+            'count_sql' => "SELECT COUNT(*) AS c FROM `{$orders}` o JOIN transactions t ON t.id={$txExpr} WHERE {$scopeCondition} AND {$success} AND ABS(COALESCE(t.amount,0)-COALESCE(o.total_price_base,0))>0.01",
+            'rows_sql' => "SELECT o.id AS order_id,{$txExpr} AS transaction_id,o.user_id,o.status AS order_status,COALESCE(o.total_price_base,0) AS order_total,COALESCE(t.amount,0) AS transaction_amount,ROUND(COALESCE(t.amount,0)-COALESCE(o.total_price_base,0),2) AS difference,{$externalExpr} AS external_ref,{$timeExpr} AS order_time FROM `{$orders}` o JOIN transactions t ON t.id={$txExpr} WHERE {$scopeCondition} AND {$success} AND ABS(COALESCE(t.amount,0)-COALESCE(o.total_price_base,0))>0.01 ORDER BY o.id DESC LIMIT {$sampleLimit}",
         ]);
 
         if ($source === 'cgo' && $ready && !empty($orderCols['quantity'])
@@ -336,8 +341,8 @@ if (!function_exists('commerceConsistencyRunRemoteSource')) {
                 'help_en' => 'A successful order must have exactly the requested number of delivered items.',
                 'skip' => !$ready || empty($orderCols['quantity']),
                 'skip_reason' => 'quantity_or_key_schema_unavailable',
-                'count_sql' => "SELECT COUNT(*) AS c FROM `{$orders}` o WHERE {$success} AND {$keyCount}<>COALESCE(o.quantity,0)",
-                'rows_sql' => "SELECT o.id AS order_id,{$txExpr} AS transaction_id,o.user_id,o.status,COALESCE(o.quantity,0) AS quantity,{$keyCount} AS key_count,{$externalExpr} AS external_ref,{$timeExpr} AS order_time FROM `{$orders}` o WHERE {$success} AND {$keyCount}<>COALESCE(o.quantity,0) ORDER BY o.id DESC LIMIT {$sampleLimit}",
+                'count_sql' => "SELECT COUNT(*) AS c FROM `{$orders}` o WHERE {$scopeCondition} AND {$success} AND {$keyCount}<>COALESCE(o.quantity,0)",
+                'rows_sql' => "SELECT o.id AS order_id,{$txExpr} AS transaction_id,o.user_id,o.status,COALESCE(o.quantity,0) AS quantity,{$keyCount} AS key_count,{$externalExpr} AS external_ref,{$timeExpr} AS order_time FROM `{$orders}` o WHERE {$scopeCondition} AND {$success} AND {$keyCount}<>COALESCE(o.quantity,0) ORDER BY o.id DESC LIMIT {$sampleLimit}",
             ]);
         }
 
@@ -350,8 +355,8 @@ if (!function_exists('commerceConsistencyRunRemoteSource')) {
             'help_en' => 'The provider may have delivered keys while the order or transaction was never finalized.',
             'skip' => !$ready,
             'skip_reason' => 'orders_or_keys_schema_unavailable',
-            'count_sql' => "SELECT COUNT(*) AS c FROM `{$orders}` o WHERE NOT ({$success}) AND {$keyCount}>0",
-            'rows_sql' => "SELECT o.id AS order_id,{$txExpr} AS transaction_id,o.user_id,o.status,{$quantityExpr} AS quantity,{$keyCount} AS key_count,{$externalExpr} AS external_ref,{$timeExpr} AS order_time FROM `{$orders}` o WHERE NOT ({$success}) AND {$keyCount}>0 ORDER BY o.id DESC LIMIT {$sampleLimit}",
+            'count_sql' => "SELECT COUNT(*) AS c FROM `{$orders}` o WHERE {$scopeCondition} AND NOT ({$success}) AND {$keyCount}>0",
+            'rows_sql' => "SELECT o.id AS order_id,{$txExpr} AS transaction_id,o.user_id,o.status,{$quantityExpr} AS quantity,{$keyCount} AS key_count,{$externalExpr} AS external_ref,{$timeExpr} AS order_time FROM `{$orders}` o WHERE {$scopeCondition} AND NOT ({$success}) AND {$keyCount}>0 ORDER BY o.id DESC LIMIT {$sampleLimit}",
         ]);
 
         commerceConsistencyAddCheck($report, [
@@ -363,8 +368,8 @@ if (!function_exists('commerceConsistencyRunRemoteSource')) {
             'help_en' => 'One transaction should belong to one order; duplicates can double-count payment history.',
             'skip' => !$ready || empty($orderCols['transaction_id']),
             'skip_reason' => 'transaction_id_unavailable',
-            'count_sql' => "SELECT COUNT(*) AS c FROM (SELECT transaction_id FROM `{$orders}` WHERE COALESCE(transaction_id,0)>0 GROUP BY transaction_id HAVING COUNT(*)>1) duplicate_links",
-            'rows_sql' => "SELECT transaction_id,COUNT(*) AS order_count,GROUP_CONCAT(id ORDER BY id SEPARATOR ',') AS order_ids FROM `{$orders}` WHERE COALESCE(transaction_id,0)>0 GROUP BY transaction_id HAVING COUNT(*)>1 ORDER BY transaction_id DESC LIMIT {$sampleLimit}",
+            'count_sql' => "SELECT COUNT(*) AS c FROM (SELECT o.transaction_id FROM `{$orders}` o WHERE {$scopeCondition} AND COALESCE(o.transaction_id,0)>0 GROUP BY o.transaction_id HAVING COUNT(*)>1) duplicate_links",
+            'rows_sql' => "SELECT o.transaction_id,COUNT(*) AS order_count,GROUP_CONCAT(o.id ORDER BY o.id SEPARATOR ',') AS order_ids FROM `{$orders}` o WHERE {$scopeCondition} AND COALESCE(o.transaction_id,0)>0 GROUP BY o.transaction_id HAVING COUNT(*)>1 ORDER BY o.transaction_id DESC LIMIT {$sampleLimit}",
         ]);
 
         commerceConsistencyAddCheck($report, [
@@ -376,8 +381,8 @@ if (!function_exists('commerceConsistencyRunRemoteSource')) {
             'help_en' => 'The order references a user that no longer exists, so ownership cannot be resolved.',
             'skip' => !$ready || !commerceContextHasColumns($userCols, ['id']),
             'skip_reason' => 'users_schema_unavailable',
-            'count_sql' => "SELECT COUNT(*) AS c FROM `{$orders}` o LEFT JOIN users u ON u.id=o.user_id WHERE {$success} AND u.id IS NULL",
-            'rows_sql' => "SELECT o.id AS order_id,{$txExpr} AS transaction_id,o.user_id,o.status,{$quantityExpr} AS quantity,{$externalExpr} AS external_ref,{$timeExpr} AS order_time FROM `{$orders}` o LEFT JOIN users u ON u.id=o.user_id WHERE {$success} AND u.id IS NULL ORDER BY o.id DESC LIMIT {$sampleLimit}",
+            'count_sql' => "SELECT COUNT(*) AS c FROM `{$orders}` o LEFT JOIN users u ON u.id=o.user_id WHERE {$scopeCondition} AND {$success} AND u.id IS NULL",
+            'rows_sql' => "SELECT o.id AS order_id,{$txExpr} AS transaction_id,o.user_id,o.status,{$quantityExpr} AS quantity,{$externalExpr} AS external_ref,{$timeExpr} AS order_time FROM `{$orders}` o LEFT JOIN users u ON u.id=o.user_id WHERE {$scopeCondition} AND {$success} AND u.id IS NULL ORDER BY o.id DESC LIMIT {$sampleLimit}",
         ]);
 
         $productTable = (string) ($config['product_table'] ?? '');
@@ -394,8 +399,8 @@ if (!function_exists('commerceConsistencyRunRemoteSource')) {
                 'help_en' => 'The key may still work, but product name, image, duration, and reporting can be incomplete.',
                 'skip' => !$productReady,
                 'skip_reason' => 'product_schema_unavailable',
-                'count_sql' => "SELECT COUNT(*) AS c FROM `{$orders}` o LEFT JOIN `{$productTable}` p ON p.id=o.`{$productColumn}` WHERE {$success} AND p.id IS NULL",
-                'rows_sql' => "SELECT o.id AS order_id,{$txExpr} AS transaction_id,o.user_id,o.`{$productColumn}` AS product_id,o.status,{$externalExpr} AS external_ref,{$timeExpr} AS order_time FROM `{$orders}` o LEFT JOIN `{$productTable}` p ON p.id=o.`{$productColumn}` WHERE {$success} AND p.id IS NULL ORDER BY o.id DESC LIMIT {$sampleLimit}",
+                'count_sql' => "SELECT COUNT(*) AS c FROM `{$orders}` o LEFT JOIN `{$productTable}` p ON p.id=o.`{$productColumn}` WHERE {$scopeCondition} AND {$success} AND p.id IS NULL",
+                'rows_sql' => "SELECT o.id AS order_id,{$txExpr} AS transaction_id,o.user_id,o.`{$productColumn}` AS product_id,o.status,{$externalExpr} AS external_ref,{$timeExpr} AS order_time FROM `{$orders}` o LEFT JOIN `{$productTable}` p ON p.id=o.`{$productColumn}` WHERE {$scopeCondition} AND {$success} AND p.id IS NULL ORDER BY o.id DESC LIMIT {$sampleLimit}",
             ]);
         }
     }
@@ -537,6 +542,7 @@ if (!function_exists('commerceConsistencyRun')) {
             'product_table' => 'supplier_products',
             'product_column' => 'supplier_product_id',
             'transaction_type' => 'supplier_purchase',
+            'exclude_store_api_procurement' => true,
         ], $sampleLimit);
 
         $txCols = commerceConsistencyColumns('transactions');
@@ -678,6 +684,9 @@ if (!function_exists('commerceConsistencyRun')) {
         $cgoOrderColsForProvider = commerceConsistencyColumns('cgo_orders');
         $providerCgoSourceReady = $providerSourceAware
             && commerceContextHasColumns($cgoOrderColsForProvider, ['id', 'source_kind', 'source_order_id']);
+        $supplierOrderColsForProvider = commerceConsistencyColumns('supplier_orders');
+        $providerSupplierSourceReady = $providerSourceAware
+            && commerceContextHasColumns($supplierOrderColsForProvider, ['id', 'source_kind', 'source_order_id']);
         $providerSuccess = commerceSuccessfulStatusSql('o');
         $providerKeyCount = '(SELECT COUNT(*) FROM store_api_order_keys ok WHERE ok.order_id=o.id)';
         $providerExternal = !empty($providerOrderCols['external_ref']) ? "COALESCE(o.external_ref,'')" : "''";
@@ -723,6 +732,19 @@ if (!function_exists('commerceConsistencyRun')) {
             'skip_reason' => 'store_api_or_cgo_source_schema_unavailable',
             'count_sql' => "SELECT COUNT(*) AS c FROM store_api_order_keys ok LEFT JOIN cgo_orders co ON co.id=ok.source_order_id WHERE LOWER(TRIM(COALESCE(ok.source_type,'')))='cgo' AND (ok.source_order_id IS NULL OR co.id IS NULL OR LOWER(TRIM(COALESCE(co.source_kind,'')))<>'store_api' OR COALESCE(co.source_order_id,0)<>ok.order_id)",
             'rows_sql' => "SELECT ok.id AS order_key_id,ok.order_id,ok.source_type,ok.source_order_id,COALESCE(co.id,0) AS cgo_order_id,COALESCE(co.source_kind,'') AS cgo_source_kind,COALESCE(co.source_order_id,0) AS cgo_parent_order_id,{$providerKeyTime} AS created_at FROM store_api_order_keys ok LEFT JOIN cgo_orders co ON co.id=ok.source_order_id WHERE LOWER(TRIM(COALESCE(ok.source_type,'')))='cgo' AND (ok.source_order_id IS NULL OR co.id IS NULL OR LOWER(TRIM(COALESCE(co.source_kind,'')))<>'store_api' OR COALESCE(co.source_order_id,0)<>ok.order_id) ORDER BY ok.id DESC LIMIT {$sampleLimit}",
+        ]);
+
+        commerceConsistencyAddCheck($report, [
+            'code' => 'store_api_client_invalid_supplier_source_link',
+            'severity' => 'error',
+            'title_th' => 'Store API Supplier Key เชื่อม Order ต้นทางไม่ถูกต้อง',
+            'title_en' => 'Store API supplier deliveries with an invalid source-order link',
+            'help_th' => 'คีย์จาก Store Bridge Supplier ต้องอ้าง supplier_orders ผ่าน source_order_id และ supplier order ต้องชี้กลับ Store API Order เดียวกัน',
+            'help_en' => 'A Store Bridge supplier delivery must reference supplier_orders through source_order_id, and that supplier order must point back to the same Store API order.',
+            'skip' => !$providerSupplierSourceReady,
+            'skip_reason' => 'store_api_or_supplier_source_schema_unavailable',
+            'count_sql' => "SELECT COUNT(*) AS c FROM store_api_order_keys ok LEFT JOIN supplier_orders so ON so.id=ok.source_order_id WHERE LOWER(TRIM(COALESCE(ok.source_type,'')))='supplier' AND (ok.source_order_id IS NULL OR so.id IS NULL OR LOWER(TRIM(COALESCE(so.source_kind,'')))<>'store_api' OR COALESCE(so.source_order_id,0)<>ok.order_id)",
+            'rows_sql' => "SELECT ok.id AS order_key_id,ok.order_id,ok.source_type,ok.source_order_id,COALESCE(so.id,0) AS supplier_order_id,COALESCE(so.source_kind,'') AS supplier_source_kind,COALESCE(so.source_order_id,0) AS supplier_parent_order_id,{$providerKeyTime} AS created_at FROM store_api_order_keys ok LEFT JOIN supplier_orders so ON so.id=ok.source_order_id WHERE LOWER(TRIM(COALESCE(ok.source_type,'')))='supplier' AND (ok.source_order_id IS NULL OR so.id IS NULL OR LOWER(TRIM(COALESCE(so.source_kind,'')))<>'store_api' OR COALESCE(so.source_order_id,0)<>ok.order_id) ORDER BY ok.id DESC LIMIT {$sampleLimit}",
         ]);
 
         commerceConsistencyAddCheck($report, [

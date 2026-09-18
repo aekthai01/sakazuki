@@ -4,8 +4,9 @@ require_once '../includes/auth.php';
 require_once '../includes/ranking.php';
 require_once '../includes/truemoney.php';
 
-requireLogin();
+requireLogin(true);
 requireActive();
+accountVerificationRequireComplete(true);
 
 if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
     jsonResponse(['success' => false, 'message' => 'Invalid request method']);

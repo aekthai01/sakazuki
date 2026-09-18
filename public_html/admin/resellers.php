@@ -46,7 +46,18 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
         $target = getUserById($targetId);
         $result = setManagedAccountStatus($targetId, $expectedRole, $status);
         if ($result['success']) {
-            $success = 'Reseller status updated successfully';
+            if ($action === 'ban') {
+                $securityBlock = accountVerificationBlockKnownUserSignals(
+                    $targetId,
+                    'บล็อคพร้อมบัญชี reseller โดยผู้ดูแลระบบ',
+                    (int) $_SESSION['user_id']
+                );
+                $success = !empty($securityBlock['success'])
+                    ? 'Reseller banned; email, known devices, and IPs were added to the shared block list'
+                    : 'Reseller banned locally. ' . (string) ($securityBlock['message'] ?? 'Shared security blocking was not fully completed');
+            } else {
+                $success = 'Reseller activated. Shared Email/IP/Device blocks remain until manually removed in Security';
+            }
             logHistory((int) $_SESSION['user_id'], $action . '_reseller', ucfirst($action) . ' reseller: ' . ($target['username'] ?? ('ID ' . $targetId)));
         } else {
             $error = $result['message'];
@@ -91,6 +102,13 @@ $resellerPages = (int) $resellerPageData['pages'];
 $resellersPageEnglish = getAppLang() === 'en';
 $buildResellerPageUrl = static function (int $page) use ($resellerSearch): string {
     $params = ['page' => max(1, $page)];
+    if ($resellerSearch !== '') $params['q'] = $resellerSearch;
+    return 'resellers.php?' . http_build_query($params);
+};
+$securityResellerId = isset($_GET['security_id']) && is_scalar($_GET['security_id']) ? max(0, (int) $_GET['security_id']) : 0;
+$resellerSecurityDetails = $securityResellerId > 0 ? accountVerificationAdminAccountSecurityDetails($securityResellerId, $expectedRole) : null;
+$buildResellerSecurityUrl = static function (int $userId) use ($resellerSearch, $resellerPage): string {
+    $params = ['security_id' => max(0, $userId), 'page' => max(1, $resellerPage)];
     if ($resellerSearch !== '') $params['q'] = $resellerSearch;
     return 'resellers.php?' . http_build_query($params);
 };
@@ -170,6 +188,61 @@ $buildResellerPageUrl = static function (int $page) use ($resellerSearch): strin
             </div>
         </div>
 
+        <?php if (is_array($resellerSecurityDetails) && !empty($resellerSecurityDetails['success'])):
+            $securityAccount = $resellerSecurityDetails['account'];
+            $securityDevices = is_array($resellerSecurityDetails['devices'] ?? null) ? $resellerSecurityDetails['devices'] : [];
+            $rememberedDevices = is_array($resellerSecurityDetails['remembered_devices'] ?? null) ? $resellerSecurityDetails['remembered_devices'] : [];
+        ?>
+        <div class="fixed inset-0 bg-black/60 backdrop-blur-sm hidden items-center justify-center z-50 p-3" id="securityDetailModal" role="dialog" aria-modal="true" aria-hidden="true" tabindex="-1">
+        <section class="glass rounded-lg md:rounded-xl p-4 md:p-6 w-full" style="max-width:72rem;max-height:92vh;overflow:auto;">
+            <div class="flex flex-col md:flex-row md:items-start md:justify-between gap-3 mb-4">
+                <div>
+                    <h2 class="text-base md:text-lg font-semibold text-white"><i class="bi bi-shield-check text-indigo-300 mr-2"></i><?php echo $resellersPageEnglish ? 'Security details' : 'รายละเอียดความปลอดภัย'; ?> · <?php echo htmlspecialchars((string) ($securityAccount['username'] ?? ''), ENT_QUOTES, 'UTF-8'); ?></h2>
+                    <p class="text-xs md:text-sm text-gray-400 mt-1"><?php echo $resellersPageEnglish ? 'Local account data plus device observations synchronized through Shared Security.' : 'ข้อมูลบัญชีในฐานนี้ + อุปกรณ์ที่ซิงก์ผ่าน Shared Security'; ?></p>
+                </div>
+                <button type="button" onclick="closeSecurityDetailModal()" class="rounded-lg bg-white/10 hover:bg-white/15 px-3 py-2 text-sm text-center"><?php echo $resellersPageEnglish ? 'Close' : 'ปิดรายละเอียด'; ?></button>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 text-sm mb-4">
+                <div class="rounded-xl bg-white/5 p-3"><div class="text-xs text-gray-500">Email</div><div class="mt-1 break-all select-all"><?php echo htmlspecialchars((string) ($securityAccount['email'] ?? ''), ENT_QUOTES, 'UTF-8'); ?></div><div class="text-xs <?php echo !empty($resellerSecurityDetails['email_blocked']) ? 'text-red-300' : 'text-gray-500'; ?>"><?php echo !empty($resellerSecurityDetails['email_blocked']) ? ($resellersPageEnglish ? 'Shared block: active' : 'อยู่ในรายการบล็อคร่วม') : ($resellersPageEnglish ? 'Shared block: none' : 'ไม่อยู่ในรายการบล็อคร่วม'); ?></div></div>
+                <div class="rounded-xl bg-white/5 p-3"><div class="text-xs text-gray-500">Email OTP</div><div class="mt-1"><?php echo !empty($securityAccount['email_verified_at']) ? ($resellersPageEnglish ? 'Verified' : 'ยืนยันแล้ว') : ($resellersPageEnglish ? 'Not verified' : 'ยังไม่ยืนยัน'); ?></div><div class="text-xs text-gray-500"><?php echo htmlspecialchars((string) ($securityAccount['email_verified_at'] ?? ''), ENT_QUOTES, 'UTF-8'); ?></div></div>
+                <div class="rounded-xl bg-white/5 p-3"><div class="text-xs text-gray-500"><?php echo $resellersPageEnglish ? 'Account status' : 'สถานะบัญชี'; ?></div><div class="mt-1"><?php echo htmlspecialchars((string) ($securityAccount['status'] ?? ''), ENT_QUOTES, 'UTF-8'); ?></div><div class="text-xs text-gray-500">ID #<?php echo (int) ($securityAccount['id'] ?? 0); ?></div></div>
+                <div class="rounded-xl bg-white/5 p-3"><div class="text-xs text-gray-500"><?php echo $resellersPageEnglish ? 'Created' : 'สร้างบัญชี'; ?></div><div class="mt-1"><?php echo htmlspecialchars((string) ($securityAccount['created_at'] ?? ''), ENT_QUOTES, 'UTF-8'); ?></div><div class="text-xs text-gray-500"><?php echo htmlspecialchars((string) ($resellerSecurityDetails['site_id'] ?? ''), ENT_QUOTES, 'UTF-8'); ?></div></div>
+            </div>
+            <div class="overflow-x-auto rounded-xl border border-white/10">
+                <table class="min-w-full text-xs md:text-sm">
+                    <thead class="text-gray-500 bg-white/5"><tr><th class="text-left p-2">อุปกรณ์</th><th class="text-left p-2">เบราว์เซอร์</th><th class="text-left p-2">IP แรก</th><th class="text-left p-2">IP ล่าสุด</th><th class="text-left p-2">เห็นครั้งแรก</th><th class="text-left p-2">ล่าสุด</th><th class="p-2"></th></tr></thead>
+                    <tbody>
+                    <?php foreach ($securityDevices as $securityDevice): ?>
+                        <tr class="border-t border-white/5"><td class="p-2"><?php echo htmlspecialchars((string) ($securityDevice['device_label'] ?? 'ไม่ทราบรุ่น'), ENT_QUOTES, 'UTF-8'); ?><div class="mono text-xs text-gray-600"><?php echo htmlspecialchars(substr((string) ($securityDevice['device_hash'] ?? ''), 0, 16) . '…', ENT_QUOTES, 'UTF-8'); ?></div></td><td class="p-2"><?php echo htmlspecialchars((string) ($securityDevice['browser_label'] ?? 'ไม่ทราบ'), ENT_QUOTES, 'UTF-8'); ?></td><td class="p-2 mono"><?php echo htmlspecialchars((string) ($securityDevice['first_ip'] ?? ''), ENT_QUOTES, 'UTF-8'); ?></td><td class="p-2 mono"><?php echo htmlspecialchars((string) ($securityDevice['last_ip'] ?? ''), ENT_QUOTES, 'UTF-8'); ?></td><td class="p-2"><?php echo htmlspecialchars((string) ($securityDevice['first_seen_at'] ?? ''), ENT_QUOTES, 'UTF-8'); ?></td><td class="p-2"><?php echo htmlspecialchars((string) ($securityDevice['last_seen_at'] ?? ''), ENT_QUOTES, 'UTF-8'); ?></td><td class="p-2"><?php if (!empty($securityDevice['device_hash']) && !empty($resellerSecurityDetails['site_id'])): ?><a class="text-indigo-300 hover:text-white" href="security.php?<?php echo htmlspecialchars(http_build_query(['detail_site' => (string) $resellerSecurityDetails['site_id'], 'detail_user' => (int) ($securityAccount['id'] ?? 0), 'detail_device' => (string) $securityDevice['device_hash']]), ENT_QUOTES, 'UTF-8'); ?>"><?php echo $resellersPageEnglish ? 'More' : 'เพิ่มเติม'; ?></a><?php endif; ?></td></tr>
+                    <?php endforeach; ?>
+                    <?php if ($securityDevices === []): ?><tr><td colspan="7" class="p-4 text-center text-gray-500"><?php echo $resellersPageEnglish ? 'No device observations yet.' : 'ยังไม่มีข้อมูลอุปกรณ์'; ?></td></tr><?php endif; ?>
+                    </tbody>
+                </table>
+            </div>
+            <div class="mt-4 rounded-xl border border-white/10 overflow-hidden">
+                <div class="px-4 py-3 bg-white/5">
+                    <div class="font-medium"><?php echo $resellersPageEnglish ? 'Remembered-device sessions' : 'อุปกรณ์ที่กดจดจำ 7–30 วัน'; ?></div>
+                    <div class="text-xs text-gray-500"><?php echo $resellersPageEnglish ? 'The token value is never shown. Only last IP / use time / expiry are displayed.' : 'ไม่แสดง token จริง แสดงเฉพาะ IP ล่าสุด เวลาใช้งาน และวันหมดอายุ'; ?></div>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full text-xs">
+                        <thead class="text-gray-500"><tr><th class="text-left p-2">IP ล่าสุด</th><th class="text-left p-2"><?php echo $resellersPageEnglish ? 'Last used' : 'ใช้ล่าสุด'; ?></th><th class="text-left p-2"><?php echo $resellersPageEnglish ? 'Expires' : 'หมดอายุ'; ?></th><th class="text-left p-2"><?php echo $resellersPageEnglish ? 'Remaining' : 'คงเหลือ'; ?></th></tr></thead>
+                        <tbody>
+                        <?php foreach ($rememberedDevices as $remembered): ?>
+                            <tr class="border-t border-white/5"><td class="p-2 mono"><?php echo htmlspecialchars((string) ($remembered['last_ip'] ?? ''), ENT_QUOTES, 'UTF-8'); ?></td><td class="p-2"><?php echo htmlspecialchars((string) ($remembered['last_used_at'] ?? $remembered['created_at'] ?? ''), ENT_QUOTES, 'UTF-8'); ?></td><td class="p-2"><?php echo htmlspecialchars((string) ($remembered['expires_at'] ?? ''), ENT_QUOTES, 'UTF-8'); ?></td><td class="p-2"><?php echo isset($remembered['remaining_days']) ? (int) $remembered['remaining_days'] . ($resellersPageEnglish ? ' day(s)' : ' วัน') : '-'; ?></td></tr>
+                        <?php endforeach; ?>
+                        <?php if ($rememberedDevices === []): ?><tr><td colspan="4" class="p-3 text-center text-gray-500"><?php echo $resellersPageEnglish ? 'No active remembered-device token.' : 'ไม่มี Remember Device ที่ยังไม่หมดอายุ'; ?></td></tr><?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <?php if (empty($resellerSecurityDetails['shared_available'])): ?><p class="text-xs text-yellow-300 mt-3"><?php echo $resellersPageEnglish ? 'Shared Security is temporarily unavailable; this panel is showing local device records.' : 'Shared Security เชื่อมต่อไม่ได้ชั่วคราว หน้านี้กำลังแสดงข้อมูลอุปกรณ์จากฐานปัจจุบัน'; ?></p><?php endif; ?>
+        </section>
+        </div>
+        <?php elseif ($securityResellerId > 0): ?>
+        <div class="glass rounded-xl p-4 mb-4 text-yellow-300 text-sm"><?php echo $resellersPageEnglish ? 'Security details could not be loaded for this account.' : 'ไม่สามารถโหลดรายละเอียดความปลอดภัยของบัญชีนี้ได้'; ?></div>
+        <?php endif; ?>
+
         <!-- Resellers Table -->
         <div class="glass rounded-lg md:rounded-xl overflow-hidden animate-fade-in">
             <div class="p-4 md:p-6">
@@ -220,6 +293,9 @@ $buildResellerPageUrl = static function (int $page) use ($resellerSearch): strin
                                                 <button onclick="updateBalanceModal(<?php echo (int)$reseller['id']; ?>, <?php echo htmlJsArg((string)$reseller['username']); ?>)" class="p-1.5 md:p-2 rounded-lg hover:bg-yellow-500/20 text-yellow-400 transition" data-lang-title="admin.users.modal.balance_title" title="<?php echo Lang::t('admin.users.modal.balance_title'); ?>">
                                                     <i class="bi bi-wallet2 text-xs md:text-sm"></i>
                                                 </button>
+                                                <a href="<?php echo htmlspecialchars($buildResellerSecurityUrl((int) $reseller['id']), ENT_QUOTES, 'UTF-8'); ?>" class="p-1.5 md:p-2 rounded-lg hover:bg-indigo-500/20 text-indigo-300 transition" title="<?php echo $resellersPageEnglish ? 'Security details' : 'รายละเอียด IP / อุปกรณ์ / OTP'; ?>">
+                                                    <i class="bi bi-shield-check text-xs md:text-sm"></i>
+                                                </a>
                                                 <button onclick="editResellerEmail(<?php echo (int)$reseller['id']; ?>, <?php echo htmlJsArg((string)$reseller['username']); ?>, <?php echo htmlJsArg((string)$reseller['email']); ?>)" class="p-1.5 md:p-2 rounded-lg hover:bg-blue-500/20 text-blue-400 transition" title="เปลี่ยน Gmail">
                                                     <i class="bi bi-envelope-at text-xs md:text-sm"></i>
                                                 </button>
@@ -350,6 +426,15 @@ $buildResellerPageUrl = static function (int $page) use ($resellerSearch): strin
             }
         }
 
+        function closeSecurityDetailModal() {
+            closeModal('securityDetailModal');
+            try {
+                const url = new URL(window.location.href);
+                url.searchParams.delete('security_id');
+                history.replaceState({}, '', url.pathname + (url.search ? url.search : ''));
+            } catch (e) {}
+        }
+
         function openAddModal() {
             showManagedModal('addModal');
         }
@@ -418,6 +503,10 @@ $buildResellerPageUrl = static function (int $page) use ($resellerSearch): strin
             if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
             else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
         });
+
+        <?php if (is_array($resellerSecurityDetails) && !empty($resellerSecurityDetails['success'])): ?>
+        showManagedModal('securityDetailModal');
+        <?php endif; ?>
 
         function deleteReseller(id, username) {
             if (confirm(Lang.t('admin.resellers.confirm_delete').replace('{username}', username))) {

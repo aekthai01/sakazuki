@@ -4624,6 +4624,7 @@ class Lang {
             'nav.transactions' => ['en' => 'Transactions', 'th' => 'ประวัติรายการ'],
             'nav.transactions_short' => ['en' => 'Trans', 'th' => 'รายการ'],
             'nav.users' => ['en' => 'Users', 'th' => 'ผู้ใช้'],
+            'nav.security' => ['en' => 'Security', 'th' => 'ความปลอดภัย'],
             'nav.users_short' => ['en' => 'Users', 'th' => 'ผู้ใช้'],
             'products.status.active' => ['en' => 'Active', 'th' => 'เปิดใช้งาน'],
             'register.confirm_password.placeholder' => ['en' => 'Re-enter password', 'th' => 'ยืนยันรหัสผ่านอีกครั้ง'],
@@ -10540,6 +10541,12 @@ function createManagedAccount(string $username, string $email, string $password,
     if ($email === '') {
         return ['success' => false, 'message' => 'รองรับเฉพาะอีเมล @gmail.com เท่านั้น'];
     }
+    if (function_exists('accountVerificationEmailBlockState')) {
+        $emailBlock = accountVerificationEmailBlockState($email);
+        if (!empty($emailBlock['blocked'])) {
+            return ['success' => false, 'message' => 'อีเมลนี้อยู่ในรายการบล็อคร่วม กรุณายกเลิกบล็อคก่อนสร้างบัญชี'];
+        }
+    }
     if (strlen($password) < 8 || strlen($password) > 200) {
         return ['success' => false, 'message' => 'Password must be at least 8 characters'];
     }
@@ -10822,6 +10829,12 @@ function updateOwnAccount(int $userId, string $username, string $email, string $
     $email = $emailChanged ? accountRecoveryNormalizeGmail($submittedEmail) : (string) ($user['email'] ?? '');
     if ($emailChanged && $email === '') {
         return ['success' => false, 'message' => 'รองรับเฉพาะอีเมล @gmail.com เท่านั้น'];
+    }
+    if ($emailChanged && function_exists('accountVerificationEmailBlockState')) {
+        $block = accountVerificationEmailBlockState($email);
+        if (!empty($block['blocked'])) {
+            return ['success' => false, 'message' => 'อีเมลนี้ถูกระงับจากระบบความปลอดภัย'];
+        }
     }
     if ($emailChanged && in_array((string) ($user['role'] ?? ''), ['user', 'reseller'], true)
         && (int) ($user['email_change_used'] ?? 0) === 1) {

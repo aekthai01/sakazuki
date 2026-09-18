@@ -12,6 +12,7 @@ require_once __DIR__ . '/ranking.php';
 require_once __DIR__ . '/key_history_cleanup.php';
 require_once __DIR__ . '/commerce_center.php';
 require_once __DIR__ . '/wallet_ledger.php';
+require_once __DIR__ . '/account_verification.php';
 
 function automationEnsureSchema(): bool
 {
@@ -216,7 +217,10 @@ function automationPrepareStorefrontSchemas(): array
             $rateLimitReady = function_exists('ensureRateLimitSchema')
                 ? ensureRateLimitSchema()
                 : false;
-            if ($storeBridgeReady && $cgoReady && $walletLedgerReady && $localCheckoutReady && $transactionTypesReady && $commerceCenterReady && $rateLimitReady) {
+            $accountVerificationReady = function_exists('accountVerificationRuntimeSchemaReady')
+                ? accountVerificationRuntimeSchemaReady(true)
+                : false;
+            if ($storeBridgeReady && $cgoReady && $walletLedgerReady && $localCheckoutReady && $transactionTypesReady && $commerceCenterReady && $rateLimitReady && $accountVerificationReady) {
                 return ['success' => true, 'skipped' => true, 'message' => 'Storefront schema version is already prepared'];
             }
             // Fall through: the maintenance runner independently repairs any
@@ -236,6 +240,7 @@ function automationPrepareStorefrontSchemas(): array
         'profit_columns' => (bool) ensureProfitColumns(),
         'purchase_activity' => (bool) purchaseActivityEnsureEventTable(),
         'rate_limits' => function_exists('ensureRateLimitSchema') ? (bool) ensureRateLimitSchema() : false,
+        'account_verification' => function_exists('accountVerificationEnsureSchema') ? (bool) accountVerificationEnsureSchema() : false,
         'commerce_center' => function_exists('commerceCenterEnsureSchema') ? (bool) commerceCenterEnsureSchema() : false,
         'wallet_ledger' => (bool) ensureWalletLedgerSchema(),
         'local_checkout' => function_exists('localCheckoutEnsureAdditiveSchema')
@@ -1175,21 +1180,32 @@ function automationReconcilePendingOrders(int $cgoLimit = 3, int $supplierLimit 
 
     if (storeBridgeEnsureSchema()) {
         $result = $conn->query(
-            "SELECT id FROM supplier_orders
+            "SELECT so.id,so.source_kind,so.source_order_id FROM supplier_orders so
+             JOIN supplier_connections sc ON sc.id=so.connection_id
              WHERE (
-                    (status IN ('submitting','unknown','pending','processing')
-                     AND updated_at < DATE_SUB(NOW(), INTERVAL 10 SECOND))
+                    (so.status IN ('submitting','unknown','pending','processing')
+                     AND so.updated_at < DATE_SUB(NOW(), INTERVAL 10 SECOND))
                     OR
-                    (status='manual_review'
-                     AND updated_at < DATE_SUB(NOW(), INTERVAL 2 MINUTE)
-                     AND created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR))
+                    (so.status='manual_review'
+                     AND sc.provider_type NOT IN ('vipstore_v1','starkmods_v1')
+                     AND so.updated_at < DATE_SUB(NOW(), INTERVAL 2 MINUTE)
+                     AND so.created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR))
                    )
-             ORDER BY updated_at ASC, id ASC LIMIT " . (int) $supplierLimit
+             ORDER BY so.updated_at ASC, so.id ASC LIMIT " . (int) $supplierLimit
         );
         while ($row = $result ? $result->fetch_assoc() : null) {
             if (!$row) break;
             $summary['attempted']++;
-            $reconciled = supplierBridgeReconcileOrder((int) $row['id']);
+            $supplierOrderId = (int) $row['id'];
+            $reconciled = supplierBridgeReconcileOrder($supplierOrderId);
+            if (strtolower(trim((string) ($row['source_kind'] ?? ''))) === 'store_api'
+                && (int) ($row['source_order_id'] ?? 0) > 0
+                && function_exists('storeBridgeApplySupplierOrderState')) {
+                // Keep the Store API parent in sync even when the reseller is
+                // not actively polling order_status. Supplier reconciliation
+                // never resubmits protected VIP/Stark purchases.
+                storeBridgeApplySupplierOrderState((int) $row['source_order_id'], $supplierOrderId);
+            }
             if (!empty($reconciled['success'])) $summary['reconciled']++; else $summary['failed']++;
         }
         if ($result) $result->free();

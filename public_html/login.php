@@ -34,6 +34,7 @@ $authUi = [
         'remember_unavailable' => 'ไม่สามารถเปิดการจดจำอุปกรณ์ได้ในขณะนี้ กรุณาลองอีกครั้ง หรือเอาเครื่องหมายจดจำอุปกรณ์ออกเพื่อเข้าสู่ระบบแบบปกติ',
         'expired' => 'เซสชันหมดอายุ กรุณาเข้าสู่ระบบอีกครั้ง',
         'credentials_changed' => 'รหัสผ่านของบัญชีถูกเปลี่ยน กรุณาเข้าสู่ระบบใหม่',
+        'security_blocked' => 'การเข้าถึงจากอีเมล อุปกรณ์ หรือเครือข่ายนี้ถูกระงับ กรุณาติดต่อผู้ดูแลระบบ',
         'logged_out' => 'ออกจากระบบเรียบร้อยแล้ว',
     ],
     'en' => [
@@ -53,6 +54,7 @@ $authUi = [
         'remember_unavailable' => 'Remember this device could not be enabled right now. Please try again, or turn it off to sign in normally.',
         'expired' => 'Your session expired. Please sign in again.',
         'credentials_changed' => 'The account password changed. Please sign in again.',
+        'security_blocked' => 'Access from this email, device, or network has been blocked. Please contact the administrator.',
         'logged_out' => 'You have signed out successfully.',
     ],
 ];
@@ -108,6 +110,8 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
         $error = $ui['unavailable'];
     } elseif ($code === 'remember_unavailable') {
         $error = $ui['remember_unavailable'];
+    } elseif ($code === 'security_blocked') {
+        $error = $ui['security_blocked'];
     } else {
         $error = Lang::t('login.error');
     }
@@ -122,6 +126,8 @@ if (isset($_GET['error'])) {
         $error = $ui['expired'];
     } elseif ($err === 'credentials_changed') {
         $error = $ui['credentials_changed'];
+    } elseif ($err === 'security_blocked') {
+        $error = $ui['security_blocked'];
     } else {
         $error = Lang::t('login.error');
     }

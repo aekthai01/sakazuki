@@ -47,6 +47,7 @@ if (session_status() === PHP_SESSION_NONE && !authIsStatelessStoreApiRequest()) 
 require_once __DIR__ . '/db.php';
 require_once __DIR__ . '/functions.php';
 require_once __DIR__ . '/account_recovery.php';
+require_once __DIR__ . '/account_verification.php';
 require_once __DIR__ . '/key_history_cleanup.php';
 
 if (!defined('AUTH_IDLE_TIMEOUT')) define('AUTH_IDLE_TIMEOUT', 3600);
@@ -370,6 +371,7 @@ function authStartUserSession(array $user, string $source = 'password'): void
     $_SESSION['auth_password_fingerprint'] = authPasswordFingerprint($user);
     unset($_SESSION['auth_failure_reason']);
     $GLOBALS['auth_current_user'] = $user;
+    accountVerificationTouchDevice((int) $user['id'], true);
 }
 
 function authIssueRememberToken(array $user, int $requestedDays): bool
@@ -507,6 +509,21 @@ function attemptRememberedLogin(): bool
             return false;
         }
 
+        $accessBlock = accountVerificationAccessBlock((int) $user['id'], (string) $user['role']);
+        if (!empty($accessBlock['blocked'])) {
+            $delete = $conn->prepare('DELETE FROM auth_remember_tokens WHERE selector = ?');
+            if ($delete) {
+                $delete->bind_param('s', $selector);
+                $delete->execute();
+                $delete->close();
+            }
+            $conn->commit();
+            $transactionStarted = false;
+            $_SESSION['auth_failure_reason'] = 'security_blocked';
+            authClearRememberCookie();
+            return false;
+        }
+
         $matchesCurrent = hash_equals((string) $row['token_hash'], $candidateHash);
         $previousUntil = !empty($row['previous_valid_until'])
             ? strtotime((string) $row['previous_valid_until'])
@@ -576,7 +593,8 @@ function authClearSessionIdentity(bool $regenerate = true): void
     foreach ([
         'user_id', 'username', 'role', 'balance', 'login_time', 'last_activity',
         'login_ip', 'auth_source', 'auth_regenerated_at', 'auth_password_fingerprint', 'remember_selector',
-        'remember_expires_at', 'remember_days'
+        'remember_expires_at', 'remember_days', 'account_device_touch_at',
+        'shared_security_block_cache'
     ] as $key) {
         unset($_SESSION[$key]);
     }
@@ -612,6 +630,14 @@ function authValidateCurrentSession(bool $touchActivity = true): bool
         return false;
     }
 
+    $accessBlock = accountVerificationAccessBlock($userId, (string) ($user['role'] ?? ''));
+    if (!empty($accessBlock['blocked'])) {
+        $_SESSION['auth_failure_reason'] = 'security_blocked';
+        forgetCurrentRememberedDevice();
+        authClearSessionIdentity();
+        return false;
+    }
+
     $currentPasswordFingerprint = authPasswordFingerprint($user);
     $sessionPasswordFingerprint = (string) ($_SESSION['auth_password_fingerprint'] ?? '');
     if ($sessionPasswordFingerprint !== '' && !hash_equals($sessionPasswordFingerprint, $currentPasswordFingerprint)) {
@@ -629,6 +655,7 @@ function authValidateCurrentSession(bool $touchActivity = true): bool
     $_SESSION['role'] = (string) $user['role'];
     $_SESSION['balance'] = $user['balance'];
     $GLOBALS['auth_current_user'] = $user;
+    accountVerificationTouchDevice($userId);
 
     if ($touchActivity) $_SESSION['last_activity'] = time();
     $lastRenewal = (int) ($_SESSION['auth_regenerated_at'] ?? $_SESSION['login_time'] ?? 0);
@@ -654,12 +681,12 @@ function authBootstrapAuthentication(): void
     }
 }
 
-function requireLogin(): void
+function requireLogin(bool $allowUnverified = false): void
 {
     if (!isLoggedIn() && !attemptRememberedLogin()) {
         $reason = (string) ($_SESSION['auth_failure_reason'] ?? '');
         unset($_SESSION['auth_failure_reason']);
-        if (in_array($reason, ['expired', 'banned', 'credentials_changed'], true)) {
+        if (in_array($reason, ['expired', 'banned', 'credentials_changed', 'security_blocked'], true)) {
             authRedirect('login.php?error=' . rawurlencode($reason));
         }
         authRedirect('login.php');
@@ -668,6 +695,9 @@ function requireLogin(): void
         $reason = (string) ($_SESSION['auth_failure_reason'] ?? 'banned');
         unset($_SESSION['auth_failure_reason']);
         authRedirect('login.php?error=' . rawurlencode($reason));
+    }
+    if (!$allowUnverified) {
+        accountVerificationRequireComplete();
     }
 }
 
@@ -693,9 +723,9 @@ function isUserActive($userId = null): bool
     return $user && ($user['status'] ?? '') === 'active';
 }
 
-function requireActive(): void
+function requireActive(bool $allowUnverified = false): void
 {
-    requireLogin();
+    requireLogin($allowUnverified);
     if (!isUserActive()) authRedirect('login.php?error=banned');
 }
 
@@ -762,6 +792,15 @@ function login($username, $password, $rememberDays = 0): array
         ];
         if ($user['status'] !== 'active' || !authRoleIsValid($user['role'])) {
             return ['success' => false, 'code' => 'inactive', 'message' => 'Your account is not active'];
+        }
+
+        $accessBlock = accountVerificationAccessBlock((int) $user['id'], (string) $user['role']);
+        if (!empty($accessBlock['blocked'])) {
+            logSuspiciousActivity('blocked_login_attempt', [
+                'user_id' => (int) $user['id'],
+                'block_code' => (string) ($accessBlock['code'] ?? 'blocked'),
+            ]);
+            return ['success' => false, 'code' => 'security_blocked', 'message' => 'Access denied'];
         }
 
         // Transparently update old hashes when PHP's configured default changes.
@@ -885,6 +924,13 @@ function register($username, $email, $password, $role = 'user'): array
         return ['success' => false, 'message' => 'Password must be at least 8 characters'];
     }
 
+    if (!$creatorIsAdmin) {
+        $emailBlock = accountVerificationEmailBlockState($email);
+        if (!empty($emailBlock['blocked'])) {
+            return ['success' => false, 'message' => 'อีเมลนี้ถูกระงับการสมัครบัญชี'];
+        }
+    }
+
     $check = $conn->prepare('SELECT id FROM users WHERE username = ? OR email = ? LIMIT 1');
     if (!$check) return ['success' => false, 'message' => 'Registration failed'];
     $check->bind_param('ss', $username, $email);
@@ -921,6 +967,7 @@ function redirectByRole(): void
         authRedirect('login.php');
     }
     if (isAdmin()) authRedirect('admin/dashboard.php');
+    accountVerificationRequireComplete();
     if (isReseller()) authRedirect('reseller/buy.php');
     if (isUser()) authRedirect('user/buy.php');
     authClearSessionIdentity();

@@ -81,6 +81,7 @@ const Lang = {
         'nav.home': { en: 'Home', th: 'หน้าแรก' },
         'nav.dashboard': { en: 'Dashboard', th: 'แดชบอร์ด' },
         'nav.users': { en: 'Users', th: 'ผู้ใช้งาน' },
+        'nav.security': { en: 'Security', th: 'ความปลอดภัย' },
         'nav.resellers': { en: 'Resellers', th: 'รีเซลเลอร์' },
         'nav.products': { en: 'Products', th: 'สินค้า' },
         'nav.keys': { en: 'Keys', th: 'คีย์' },

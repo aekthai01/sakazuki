@@ -14,9 +14,12 @@ require_once __DIR__ . '/db.php';
 require_once __DIR__ . '/functions.php';
 require_once __DIR__ . '/commerce_center.php';
 require_once __DIR__ . '/security.php';
+require_once __DIR__ . '/account_verification.php';
 
-if (!defined('STORE_BRIDGE_VERSION')) define('STORE_BRIDGE_VERSION', '2.3');
+if (!defined('STORE_BRIDGE_VERSION')) define('STORE_BRIDGE_VERSION', '2.6');
 if (!defined('STORE_BRIDGE_MAX_RESPONSE')) define('STORE_BRIDGE_MAX_RESPONSE', 2 * 1024 * 1024);
+require_once __DIR__ . '/store_bridge_vipstore.php';
+require_once __DIR__ . '/store_bridge_starkmods.php';
 
 function storeBridgeBase64UrlEncode(string $bytes): string
 {
@@ -114,6 +117,7 @@ function storeBridgeRuntimeSchemaReady(bool $refresh = false): bool
         'store_api_clients' => [
             'id','key_hash','status','deleted_at','client_type','billing_mode','linked_user_id','balance','currency',
             'price_tier','price_multiplier','rate_limit_per_minute','order_rate_limit_per_minute','max_order_amount','daily_spend_limit',
+            'source_access_json',
         ],
         'store_api_orders' => [
             'id','client_id','external_ref','remote_product_id','source_product_id','source_variant_id','duration','quantity',
@@ -123,7 +127,9 @@ function storeBridgeRuntimeSchemaReady(bool $refresh = false): bool
             'refunded_amount','refunded_at','error_message','created_at','updated_at','completed_at',
         ],
         'store_api_order_keys' => ['id','order_id','source_type','source_key_id','source_order_id','key_code','key_hash','created_at'],
-        'supplier_orders' => ['id','external_ref','connection_id','supplier_product_id','user_id','status','transaction_id','response_json','error_message'],
+        'supplier_connections' => ['id','provider_type','purchase_mode','endpoint_url','api_key_ciphertext','status','priority','connect_timeout','request_timeout'],
+        'supplier_catalog_links' => ['id','supplier_product_id','local_product_id','local_variant_id','api_fallback_enabled','source_priority','max_supplier_cost','sync_duration'],
+        'supplier_orders' => ['id','external_ref','source_kind','source_order_id','connection_id','supplier_product_id','user_id','status','transaction_id','response_json','error_message'],
     ];
     foreach ($required as $table => $columns) {
         if (!sakazukiTableColumnsReady($table, $columns, $refresh)) return $ready = false;
@@ -200,6 +206,7 @@ function storeBridgeEnsureSchema(): bool
             order_rate_limit_per_minute INT UNSIGNED NOT NULL DEFAULT 10,
             max_order_amount DECIMAL(16,2) NOT NULL DEFAULT 0,
             daily_spend_limit DECIMAL(16,2) NOT NULL DEFAULT 0,
+            source_access_json TEXT NULL,
             created_by BIGINT UNSIGNED NULL,
             last_used_at DATETIME NULL,
             deleted_at DATETIME NULL,
@@ -363,6 +370,7 @@ function storeBridgeEnsureSchema(): bool
             id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
             name VARCHAR(190) NOT NULL,
             provider_type VARCHAR(60) NOT NULL DEFAULT 'sakazuki_v1',
+            purchase_mode VARCHAR(20) NOT NULL DEFAULT 'live',
             endpoint_url VARCHAR(1000) NOT NULL,
             api_key_ciphertext TEXT NOT NULL,
             status ENUM('active','inactive') NOT NULL DEFAULT 'active',
@@ -449,6 +457,7 @@ function storeBridgeEnsureSchema(): bool
             local_variant_id INT NOT NULL,
             api_fallback_enabled TINYINT(1) NOT NULL DEFAULT 1,
             source_priority INT NOT NULL DEFAULT 100,
+            max_supplier_cost DECIMAL(16,2) NULL,
             sync_duration TINYINT(1) NOT NULL DEFAULT 1,
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -473,6 +482,8 @@ function storeBridgeEnsureSchema(): bool
         "CREATE TABLE IF NOT EXISTS supplier_orders (
             id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
             external_ref VARCHAR(120) NOT NULL,
+            source_kind VARCHAR(20) NOT NULL DEFAULT 'storefront',
+            source_order_id BIGINT UNSIGNED NULL,
             connection_id BIGINT UNSIGNED NOT NULL,
             supplier_product_id BIGINT UNSIGNED NOT NULL,
             user_id BIGINT UNSIGNED NOT NULL,
@@ -496,7 +507,8 @@ function storeBridgeEnsureSchema(): bool
             KEY idx_supplier_order_user (user_id, created_at),
             KEY idx_supplier_order_status (status),
             KEY idx_supplier_order_transaction (transaction_id),
-            KEY idx_supplier_order_connection (connection_id, created_at)
+            KEY idx_supplier_order_connection (connection_id, created_at),
+            KEY idx_supplier_order_source (source_kind, source_order_id, created_at)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci",
         "CREATE TABLE IF NOT EXISTS supplier_order_keys (
             id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -546,6 +558,8 @@ function storeBridgeEnsureSchema(): bool
         // Some Store Bridge installations predate the transaction link. Ensure
         // the column exists before the non-unique lookup index is added below.
         ['supplier_orders', 'transaction_id', 'BIGINT UNSIGNED NULL'],
+        ['supplier_orders', 'source_kind', "VARCHAR(20) NOT NULL DEFAULT 'storefront' AFTER external_ref"],
+        ['supplier_orders', 'source_order_id', 'BIGINT UNSIGNED NULL AFTER source_kind'],
         ['store_api_clients', 'deleted_at', 'DATETIME NULL AFTER last_used_at'],
         ['store_api_clients', 'client_type', "ENUM('admin','reseller_self_service') NOT NULL DEFAULT 'admin' AFTER status"],
         ['store_api_clients', 'billing_mode', "ENUM('api_balance','reseller_wallet') NOT NULL DEFAULT 'api_balance' AFTER client_type"],
@@ -560,6 +574,7 @@ function storeBridgeEnsureSchema(): bool
         ['store_api_clients', 'order_rate_limit_per_minute', 'INT UNSIGNED NOT NULL DEFAULT 10 AFTER rate_limit_per_minute'],
         ['store_api_clients', 'max_order_amount', 'DECIMAL(16,2) NOT NULL DEFAULT 0 AFTER order_rate_limit_per_minute'],
         ['store_api_clients', 'daily_spend_limit', 'DECIMAL(16,2) NOT NULL DEFAULT 0 AFTER max_order_amount'],
+        ['store_api_clients', 'source_access_json', 'TEXT NULL AFTER daily_spend_limit'],
         ['store_api_orders', 'billing_mode', "ENUM('api_balance','reseller_wallet') NOT NULL DEFAULT 'api_balance'"],
         ['store_api_orders', 'billing_user_id', 'BIGINT UNSIGNED NULL'],
         ['store_api_orders', 'billing_transaction_id', 'BIGINT UNSIGNED NULL'],
@@ -579,6 +594,7 @@ function storeBridgeEnsureSchema(): bool
         ['supplier_connections', 'user_price_mode', "VARCHAR(20) NOT NULL DEFAULT 'source' AFTER sync_prices"],
         ['supplier_connections', 'reseller_price_mode', "VARCHAR(20) NOT NULL DEFAULT 'source' AFTER user_price_mode"],
         ['supplier_connections', 'protect_below_cost', 'TINYINT(1) NOT NULL DEFAULT 1 AFTER reseller_markup_percent'],
+        ['supplier_connections', 'purchase_mode', "VARCHAR(20) NOT NULL DEFAULT 'live'"],
         ['supplier_products', 'source_price_user', 'DECIMAL(16,2) NULL AFTER cost_base'],
         ['supplier_products', 'source_price_reseller', 'DECIMAL(16,2) NULL AFTER source_price_user'],
         ['supplier_products', 'user_price_mode', "VARCHAR(20) NOT NULL DEFAULT 'connection' AFTER source_price_reseller"],
@@ -598,6 +614,7 @@ function storeBridgeEnsureSchema(): bool
         // Position-independent ADD COLUMN has the best chance of using an instant
         // DDL path on shared hosting and keeps deployment lock time minimal.
         ['supplier_catalog_links', 'source_priority', 'INT NOT NULL DEFAULT 100'],
+        ['supplier_catalog_links', 'max_supplier_cost', 'DECIMAL(16,2) NULL'],
         ['supplier_catalog_links', 'sync_duration', 'TINYINT(1) NOT NULL DEFAULT 1 AFTER api_fallback_enabled'],
     ];
     foreach ($columns as $column) {
@@ -650,6 +667,11 @@ function storeBridgeEnsureSchema(): bool
                 // Optional performance index. Keep Store Bridge available when a
                 // shared-hosting database user lacks INDEX/ALTER permission.
                 error_log('Store Bridge transaction index creation warning: ' . $conn->error);
+            }
+        }
+        if (storeBridgeIndexInfo('supplier_orders', 'idx_supplier_order_source') === null) {
+            if (!$conn->query('ALTER TABLE `supplier_orders` ADD INDEX `idx_supplier_order_source` (`source_kind`,`source_order_id`,`created_at`)')) {
+                error_log('Store Bridge supplier source index creation warning: ' . $conn->error);
             }
         }
         if (storeBridgeIndexInfo('store_api_clients', 'idx_store_api_client_linked_user') === null) {
@@ -1289,6 +1311,67 @@ function storeBridgeNormalizeBillingMode($value): string
 {
     $mode = strtolower(trim((string) $value));
     return $mode === 'reseller_wallet' ? 'reseller_wallet' : 'api_balance';
+}
+
+function storeBridgeNormalizeSourceAccess($value): array
+{
+    $policy = ['cgo' => true, 'supplier_connection_ids' => []];
+    if ($value === null || $value === '') return $policy;
+
+    if (is_string($value)) {
+        $decoded = json_decode($value, true);
+        if (!is_array($decoded)) return $policy;
+        $value = $decoded;
+    }
+    if (!is_array($value)) return $policy;
+
+    if (array_key_exists('cgo', $value)) $policy['cgo'] = !empty($value['cgo']);
+    $ids = [];
+    foreach ((array) ($value['supplier_connection_ids'] ?? []) as $id) {
+        if (is_int($id) || (is_string($id) && ctype_digit(trim($id)))) {
+            $id = (int) $id;
+            if ($id > 0) $ids[$id] = $id;
+        }
+        if (count($ids) >= 100) break;
+    }
+    $policy['supplier_connection_ids'] = array_values($ids);
+    sort($policy['supplier_connection_ids'], SORT_NUMERIC);
+    return $policy;
+}
+
+function storeBridgeClientSourceAccess(array $client): array
+{
+    // NULL/blank is the backwards-compatible policy: LOCAL is always available,
+    // CGO remains enabled, and Store Bridge suppliers stay opt-in.
+    return storeBridgeNormalizeSourceAccess($client['source_access_json'] ?? null);
+}
+
+function storeBridgeEncodeSourceAccess(array $input): string
+{
+    $policy = storeBridgeNormalizeSourceAccess($input);
+    $encoded = json_encode($policy, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    return is_string($encoded) ? $encoded : '{"cgo":true,"supplier_connection_ids":[]}';
+}
+
+function storeBridgeClientAllowsCgo(array $client): bool
+{
+    $policy = storeBridgeClientSourceAccess($client);
+    return !empty($policy['cgo']);
+}
+
+function storeBridgeClientAllowedSupplierConnectionIds(array $client): array
+{
+    // Supplier access is opt-in per API client regardless of billing mode.
+    // The Store API parent owns the debit/refund: api_balance uses the client's
+    // isolated API credit, while reseller_wallet uses the linked users.balance.
+    $policy = storeBridgeClientSourceAccess($client);
+    return array_values(array_filter(array_map('intval', (array) ($policy['supplier_connection_ids'] ?? [])), static fn($id) => $id > 0));
+}
+
+function storeBridgeClientAllowsSupplierConnection(array $client, int $connectionId): bool
+{
+    if ($connectionId < 1) return false;
+    return in_array($connectionId, storeBridgeClientAllowedSupplierConnectionIds($client), true);
 }
 
 /**
@@ -2551,6 +2634,9 @@ function storeBridgeUpdateClient(int $clientId, array $input): array
     $orderRate = max(1, min(1000, (int) ($input['order_rate_limit_per_minute'] ?? 10)));
     $maxOrder = round((float) ($input['max_order_amount'] ?? 0), 2);
     $dailyLimit = round((float) ($input['daily_spend_limit'] ?? 0), 2);
+    $sourcePolicy = array_key_exists('source_access', $input) && is_array($input['source_access'])
+        ? storeBridgeNormalizeSourceAccess($input['source_access'])
+        : storeBridgeClientSourceAccess($client);
     if ($name === '' || strlen($name) > 190) return ['success' => false, 'message' => 'Client name is invalid'];
     if (!in_array($priceTier, ['reseller', 'user', 'cost'], true)) return ['success' => false, 'message' => 'Price tier is invalid'];
     if (!is_finite($multiplier) || $multiplier < 0.01 || $multiplier > 100) return ['success' => false, 'message' => 'Price multiplier must be between 0.01 and 100'];
@@ -2575,6 +2661,7 @@ function storeBridgeUpdateClient(int $clientId, array $input): array
     } else {
         $linkedUserId = 0;
     }
+    $sourceAccessJson = storeBridgeEncodeSourceAccess($sourcePolicy);
     $linkedValue = $linkedUserId > 0 ? $linkedUserId : 0;
     $conn->begin_transaction();
     try {
@@ -2601,9 +2688,9 @@ function storeBridgeUpdateClient(int $clientId, array $input): array
             throw new RuntimeException('Set the legacy API balance to 0 before switching this client to reseller_wallet. This prevents hidden/stranded API credit.');
         }
 
-        $stmt = $conn->prepare('UPDATE store_api_clients SET name=?,billing_mode=?,linked_user_id=NULLIF(?,0),price_tier=?,price_multiplier=?,allowed_ips=?,rate_limit_per_minute=?,order_rate_limit_per_minute=?,max_order_amount=?,daily_spend_limit=? WHERE id=? AND deleted_at IS NULL');
+        $stmt = $conn->prepare('UPDATE store_api_clients SET name=?,billing_mode=?,linked_user_id=NULLIF(?,0),price_tier=?,price_multiplier=?,allowed_ips=?,rate_limit_per_minute=?,order_rate_limit_per_minute=?,max_order_amount=?,daily_spend_limit=?,source_access_json=? WHERE id=? AND deleted_at IS NULL');
         if (!$stmt) throw new RuntimeException('Unable to prepare API client update');
-        $stmt->bind_param('ssisdsiiddi', $name, $billingMode, $linkedValue, $priceTier, $multiplier, $allowedIps, $rate, $orderRate, $maxOrder, $dailyLimit, $clientId);
+        $stmt->bind_param('ssisdsiiddsi', $name, $billingMode, $linkedValue, $priceTier, $multiplier, $allowedIps, $rate, $orderRate, $maxOrder, $dailyLimit, $sourceAccessJson, $clientId);
         if (!$stmt->execute() || $stmt->affected_rows < 0) {
             $stmt->close();
             throw new RuntimeException('Unable to update API client');
@@ -2938,6 +3025,14 @@ function storeBridgeAuthenticateRequest(): array
         $settings = storeBridgeResellerApiSettings();
         if (!storeBridgeResellerApiUserAllowed($linkedUserId, $settings)) {
             return ['success' => false, 'http_code' => 403, 'code' => 'api_program_disabled', 'message' => 'Reseller API access is disabled for this account', 'client_id' => (int) $client['id']];
+        }
+        if (!accountVerificationIsComplete($linkedUserId)) {
+            return ['success' => false, 'http_code' => 403, 'code' => 'account_verification_required', 'message' => 'Linked reseller account requires email verification', 'client_id' => (int) $client['id']];
+        }
+        $apiIp = function_exists('getClientIp') ? getClientIp() : trim((string) ($_SERVER['REMOTE_ADDR'] ?? ''));
+        $apiBlock = accountVerificationApiAccessBlock($linkedUserId, $apiIp);
+        if (!empty($apiBlock['blocked'])) {
+            return ['success' => false, 'http_code' => 403, 'code' => 'security_blocked', 'message' => 'Linked reseller account or network is blocked', 'client_id' => (int) $client['id']];
         }
     }
     if (storeBridgeNormalizeBillingMode($client['billing_mode'] ?? 'api_balance') === 'reseller_wallet') {
@@ -3717,6 +3812,130 @@ function storeBridgeCgoCandidate(array $product, int $quantity): ?array
     return $candidate;
 }
 
+/**
+ * Cached Store Bridge supplier capacity visible to one Store API client.
+ * LOCAL is always available; CGO and supplier connections are controlled by
+ * source_access_json. The Store API parent remains the single debit/refund
+ * authority for both API credit and linked-wallet billing, while Supplier Bridge
+ * runs procurement-only for the child order.
+ */
+function storeBridgeSupplierVariantSnapshots(array $client, array $variantIds, array $unitPrices = []): array
+{
+    global $conn;
+    $allowed = storeBridgeClientAllowedSupplierConnectionIds($client);
+    if ($allowed === [] || !storeBridgeEnsureSchema()) return [];
+
+    $variants = [];
+    foreach ($variantIds as $variantId) {
+        $variantId = (int) $variantId;
+        if ($variantId > 0) $variants[$variantId] = $variantId;
+        if (count($variants) >= 500) break;
+    }
+    if ($variants === []) return [];
+
+    $variantList = implode(',', array_values($variants));
+    $connectionList = implode(',', array_values(array_unique(array_map('intval', $allowed))));
+    if ($connectionList === '') return [];
+
+    $sql = "SELECT scl.local_product_id,scl.local_variant_id,scl.source_priority,scl.max_supplier_cost,
+                   sp.id AS supplier_product_id,sp.connection_id,sp.remote_stock,sp.cost_base,
+                   sp.inventory_checked_at,sp.updated_at,
+                   sc.provider_type,sc.priority,sc.protect_below_cost,sc.purchase_mode,
+                   CASE WHEN sp.inventory_last_error_at IS NOT NULL
+                              AND (sp.inventory_last_success_at IS NULL OR sp.inventory_last_error_at > sp.inventory_last_success_at)
+                              AND sp.inventory_last_error_at >= DATE_SUB(NOW(), INTERVAL 2 MINUTE)
+                        THEN 1 ELSE 0 END AS routing_degraded
+            FROM supplier_catalog_links scl
+            JOIN supplier_products sp ON sp.id=scl.supplier_product_id
+                 AND sp.enabled=1 AND sp.supplier_removed_at IS NULL
+            JOIN supplier_connections sc ON sc.id=sp.connection_id
+                 AND sc.status='active' AND sc.purchase_mode='live'
+            WHERE scl.api_fallback_enabled=1
+              AND scl.local_variant_id IN ($variantList)
+              AND sc.id IN ($connectionList)
+            ORDER BY scl.local_variant_id ASC,routing_degraded ASC,
+                     scl.source_priority ASC,sc.priority ASC,sc.id ASC,sp.id ASC";
+    $result = $conn->query($sql);
+    if (!$result) return [];
+
+    $snapshots = [];
+    while ($row = $result->fetch_assoc()) {
+        $variantId = (int) ($row['local_variant_id'] ?? 0);
+        if ($variantId < 1) continue;
+        $cost = round(max(0.0, (float) ($row['cost_base'] ?? 0)), 2);
+        $stock = max(0, (int) ($row['remote_stock'] ?? 0));
+        $price = array_key_exists($variantId, $unitPrices) ? round((float) $unitPrices[$variantId], 2) : null;
+        $providerType = strtolower(trim((string) ($row['provider_type'] ?? '')));
+        $maxCost = isset($row['max_supplier_cost']) && is_numeric($row['max_supplier_cost'])
+            ? round((float) $row['max_supplier_cost'], 2) : null;
+
+        $costGuard = true;
+        if (supplierBridgeProviderRequiresProtectedPurchase($providerType) && ($maxCost === null || $maxCost <= 0)) $costGuard = false;
+        if ($maxCost !== null && $maxCost > 0 && $cost > $maxCost + 0.00001) $costGuard = false;
+        $priceAllowed = $price === null || (int) ($row['protect_below_cost'] ?? 1) !== 1
+            || ($price > 0 && $price + 0.00001 >= $cost);
+        $healthy = (int) ($row['routing_degraded'] ?? 0) === 0;
+        $eligibleStock = ($costGuard && $priceAllowed && $healthy) ? $stock : 0;
+
+        if (!isset($snapshots[$variantId])) {
+            $snapshots[$variantId] = [
+                'eligible' => false,
+                'stock' => 0,
+                'supplier_product_id' => 0,
+                'connection_id' => 0,
+                'cost_base' => 0.0,
+                'inventory_checked_at' => '',
+                'updated_at' => '',
+            ];
+        }
+        if ($eligibleStock > (int) $snapshots[$variantId]['stock']) {
+            $snapshots[$variantId] = [
+                'eligible' => $eligibleStock > 0,
+                'stock' => $eligibleStock,
+                'supplier_product_id' => (int) ($row['supplier_product_id'] ?? 0),
+                'connection_id' => (int) ($row['connection_id'] ?? 0),
+                'cost_base' => $cost,
+                'inventory_checked_at' => (string) ($row['inventory_checked_at'] ?? ''),
+                'updated_at' => (string) ($row['updated_at'] ?? ''),
+            ];
+        }
+    }
+    return $snapshots;
+}
+
+function storeBridgeSupplierCandidatesForClient(array $client, array $product, int $quantity): array
+{
+    $billingMode = storeBridgeNormalizeBillingMode($client['billing_mode'] ?? 'api_balance');
+    $userId = $billingMode === 'reseller_wallet' ? (int) ($client['linked_user_id'] ?? 0) : 0;
+    $productId = (int) ($product['source_product_id'] ?? 0);
+    $variantId = (int) ($product['source_variant_id'] ?? 0);
+    if (($billingMode === 'reseller_wallet' && $userId < 1) || $productId < 1 || $variantId < 1 || $quantity < 1) return [];
+
+    $allowed = array_fill_keys(storeBridgeClientAllowedSupplierConnectionIds($client), true);
+    if ($allowed === []) return [];
+    $storeApiUnitPrice = round((float) ($product['unit_price'] ?? 0), 2);
+    if ($storeApiUnitPrice <= 0) return [];
+
+    $out = [];
+    foreach (supplierBridgeGetPurchaseCandidates($productId, $variantId, $quantity, $userId, $storeApiUnitPrice) as $row) {
+        $connectionId = (int) ($row['connection_id'] ?? 0);
+        if ($connectionId < 1 || !isset($allowed[$connectionId])) continue;
+        if (strtolower(trim((string) ($row['purchase_mode'] ?? ''))) !== 'live') continue;
+        if ((int) ($row['routing_degraded'] ?? 0) === 1) continue;
+        if ((int) ($row['remote_stock'] ?? 0) < $quantity) continue;
+
+        $maxCost = isset($row['max_supplier_cost']) && is_numeric($row['max_supplier_cost'])
+            ? round((float) $row['max_supplier_cost'], 2) : null;
+        if (supplierBridgeProviderRequiresProtectedPurchase((string) ($row['provider_type'] ?? ''))
+            && ($maxCost === null || $maxCost <= 0)) continue;
+        if ($maxCost !== null && $maxCost > 0 && (float) ($row['cost_base'] ?? 0) > $maxCost + 0.00001) continue;
+        if ((int) ($row['protect_below_cost'] ?? 1) === 1
+            && $storeApiUnitPrice + 0.00001 < (float) ($row['cost_base'] ?? 0)) continue;
+        $out[] = $row;
+    }
+    return $out;
+}
+
 function storeBridgeCgoOrderSnapshot(int $orderId, bool $includeAttempts = false): ?array
 {
     global $conn;
@@ -4028,6 +4247,231 @@ function storeBridgeReconcileCgoProviderOrder(int $storeOrderId, bool $force = f
     return storeBridgeApplyCgoOrderState($storeOrderId, $cgoOrderId);
 }
 
+
+function storeBridgeSupplierOrderSnapshot(int $orderId): ?array
+{
+    global $conn;
+    if ($orderId < 1 || !storeBridgeEnsureSchema()) return null;
+    $stmt = $conn->prepare("SELECT so.id,so.source_kind,so.source_order_id,so.connection_id,so.supplier_product_id,
+                                   so.local_product_id,so.local_variant_id,so.quantity,so.unit_cost_base,so.total_cost_base,
+                                   so.unit_price_base,so.total_price_base,so.status,so.supplier_order_id,so.external_ref,
+                                   so.error_message,so.created_at,so.updated_at,so.completed_at,sc.provider_type
+                            FROM supplier_orders so
+                            JOIN supplier_connections sc ON sc.id=so.connection_id
+                            WHERE so.id=? LIMIT 1");
+    if (!$stmt) return null;
+    $stmt->bind_param('i', $orderId);
+    if (!$stmt->execute()) { $stmt->close(); return null; }
+    $result = $stmt->get_result();
+    $row = $result ? $result->fetch_assoc() : null;
+    $stmt->close();
+    if (!$row) return null;
+
+    $keys = [];
+    $keyStmt = $conn->prepare('SELECT id,key_code,key_hash,created_at FROM supplier_order_keys WHERE order_id=? ORDER BY id ASC');
+    if ($keyStmt) {
+        $keyStmt->bind_param('i', $orderId);
+        if ($keyStmt->execute()) {
+            $kr = $keyStmt->get_result();
+            while ($key = $kr ? $kr->fetch_assoc() : null) {
+                if (!$key) break;
+                $keys[] = $key;
+            }
+        }
+        $keyStmt->close();
+    }
+    $row['keys'] = $keys;
+    return $row;
+}
+
+function storeBridgeUpdateSupplierOrderLink(int $storeOrderId, int $supplierOrderId): void
+{
+    global $conn;
+    if ($storeOrderId < 1 || $supplierOrderId < 1) return;
+    $snapshot = storeBridgeSupplierOrderSnapshot($supplierOrderId);
+    if (!$snapshot || (string) ($snapshot['source_kind'] ?? '') !== 'store_api'
+        || (int) ($snapshot['source_order_id'] ?? 0) !== $storeOrderId) return;
+    $reference = substr(trim((string) ($snapshot['supplier_order_id'] ?? '')), 0, 190);
+    if ($reference === '') $reference = substr(trim((string) ($snapshot['external_ref'] ?? '')), 0, 190);
+    $status = substr(strtolower(trim((string) ($snapshot['status'] ?? 'processing'))), 0, 40);
+    $stmt = $conn->prepare("UPDATE store_api_orders
+                            SET upstream_order_id=?,upstream_reference=NULLIF(?,''),upstream_status=?,updated_at=NOW()
+                            WHERE id=? AND fulfillment_source='supplier'");
+    if ($stmt) {
+        $stmt->bind_param('issi', $supplierOrderId, $reference, $status, $storeOrderId);
+        $stmt->execute();
+        $stmt->close();
+    }
+}
+
+function storeBridgeApplySupplierOrderState(int $storeOrderId, int $supplierOrderId): array
+{
+    global $conn;
+    $snapshot = storeBridgeSupplierOrderSnapshot($supplierOrderId);
+    if (!$snapshot || (string) ($snapshot['source_kind'] ?? '') !== 'store_api'
+        || (int) ($snapshot['source_order_id'] ?? 0) !== $storeOrderId) {
+        return ['success'=>false,'pending'=>true,'code'=>'upstream_link_unavailable','message'=>'Supplier order linkage is not available yet'];
+    }
+    storeBridgeUpdateSupplierOrderLink($storeOrderId, $supplierOrderId);
+    $status = strtolower(trim((string) ($snapshot['status'] ?? '')));
+    $quantity = max(1, (int) ($snapshot['quantity'] ?? 1));
+
+    if (in_array($status, ['success','completed'], true)) {
+        $keys = (array) ($snapshot['keys'] ?? []);
+        if (count($keys) !== $quantity) {
+            $message = 'Supplier reports completion but the stored key count does not match the Store API order quantity';
+            $u = $conn->prepare("UPDATE store_api_orders SET status='processing',upstream_status='manual_review',error_message=? WHERE id=? AND status<>'success'");
+            if ($u) { $u->bind_param('si', $message, $storeOrderId); $u->execute(); $u->close(); }
+            return ['success'=>false,'pending'=>true,'code'=>'upstream_key_integrity_pending','message'=>'Supplier delivery requires review; do not submit a duplicate order'];
+        }
+
+        $conn->begin_transaction();
+        try {
+            $lock = $conn->prepare("SELECT status,billing_transaction_id,quantity,refunded_at FROM store_api_orders
+                                    WHERE id=? AND fulfillment_source='supplier' LIMIT 1 FOR UPDATE");
+            if (!$lock) throw new RuntimeException('Unable to lock Store API order for supplier completion');
+            $lock->bind_param('i', $storeOrderId);
+            $lock->execute();
+            $lr = $lock->get_result();
+            $store = $lr ? $lr->fetch_assoc() : null;
+            $lock->close();
+            if (!$store) throw new RuntimeException('Store API order not found');
+            if (!empty($store['refunded_at'])) throw new RuntimeException('Supplier delivered after Store API refund; manual review required');
+
+            $save = $conn->prepare("INSERT INTO store_api_order_keys
+                    (order_id,source_type,source_key_id,source_order_id,key_code,key_hash)
+                    VALUES (?,'supplier',NULL,?,?,?)
+                    ON DUPLICATE KEY UPDATE key_code=VALUES(key_code),source_type='supplier',source_order_id=VALUES(source_order_id)");
+            if (!$save) throw new RuntimeException('Unable to prepare supplier key delivery');
+            foreach ($keys as $key) {
+                $keyCode = trim((string) ($key['key_code'] ?? ''));
+                if ($keyCode === '') throw new RuntimeException('Supplier delivered an empty key');
+                $hash = hash('sha256', $keyCode);
+                $save->bind_param('iiss', $storeOrderId, $supplierOrderId, $keyCode, $hash);
+                if (!$save->execute()) throw new RuntimeException('Unable to store supplier key delivery');
+            }
+            $save->close();
+
+            $txId = (int) ($store['billing_transaction_id'] ?? 0);
+            if ($txId > 0 && !updateTransactionStatus($txId, 'completed')) throw new RuntimeException('Unable to complete reseller Store API transaction');
+            $reference = substr(trim((string) ($snapshot['supplier_order_id'] ?? '')), 0, 190);
+            if ($reference === '') $reference = substr(trim((string) ($snapshot['external_ref'] ?? '')), 0, 190);
+            $cost = round((float) ($snapshot['total_cost_base'] ?? 0), 2);
+            $complete = $conn->prepare("UPDATE store_api_orders
+                SET status='success',upstream_order_id=?,upstream_reference=NULLIF(?,''),upstream_status=?,procurement_cost=?,
+                    error_message=NULL,completed_at=COALESCE(completed_at,NOW())
+                WHERE id=?");
+            if (!$complete) throw new RuntimeException('Unable to complete supplier-backed Store API order');
+            $complete->bind_param('issdi', $supplierOrderId, $reference, $status, $cost, $storeOrderId);
+            if (!$complete->execute()) { $complete->close(); throw new RuntimeException('Unable to save supplier-backed Store API completion'); }
+            $complete->close();
+
+            if (!$conn->commit()) throw new RuntimeException('Unable to commit supplier-backed Store API completion');
+            commerceCenterSyncSafe('store_api_sale', $storeOrderId);
+            return ['success'=>true,'pending'=>false,'data'=>storeBridgeProviderOrderPayload($storeOrderId)];
+        } catch (Throwable $e) {
+            try { $conn->rollback(); } catch (Throwable $ignored) {}
+            $message = storeBridgeDiagnosticSanitizeMessage($e->getMessage(), 1000);
+            $u = $conn->prepare("UPDATE store_api_orders SET status='processing',upstream_status='manual_review',error_message=? WHERE id=? AND status<>'success'");
+            if ($u) { $u->bind_param('si', $message, $storeOrderId); $u->execute(); $u->close(); }
+            error_log('Store API supplier completion pending order_id=' . $storeOrderId . ': ' . $message);
+            return ['success'=>false,'pending'=>true,'code'=>'local_completion_pending','message'=>'Supplier delivery exists but local completion is still being reconciled; do not submit a duplicate order'];
+        }
+    }
+
+    if ($status === 'refunded' || in_array($status, ['failed','cancelled','canceled'], true)) {
+        $refund = storeBridgeRefundProviderOrder($storeOrderId, (string) ($snapshot['error_message'] ?? 'Supplier fulfillment failed'), $status);
+        return [
+            'success'=>false,
+            'pending'=>empty($refund['success']),
+            'refunded'=>!empty($refund['success']),
+            'code'=>!empty($refund['success']) ? 'upstream_failed_refunded' : 'refund_pending',
+            'message'=>!empty($refund['success'])
+                ? 'Supplier fulfillment failed and the Store API balance was refunded'
+                : 'Supplier fulfillment failed; automatic refund requires attention',
+            'data'=>$refund['data'] ?? storeBridgeProviderOrderPayload($storeOrderId),
+        ];
+    }
+
+    $message = trim((string) ($snapshot['error_message'] ?? ''));
+    if ($message === '') $message = $status === 'manual_review'
+        ? 'Supplier order requires manual review'
+        : 'Supplier order is still processing';
+    $upstreamStatus = $status !== '' ? $status : 'processing';
+    $u = $conn->prepare("UPDATE store_api_orders SET status='processing',upstream_status=?,error_message=? WHERE id=? AND status<>'success'");
+    if ($u) { $u->bind_param('ssi', $upstreamStatus, $message, $storeOrderId); $u->execute(); $u->close(); }
+    return [
+        'success'=>true,'pending'=>true,
+        'code'=>$upstreamStatus === 'manual_review' ? 'manual_review' : 'processing',
+        'message'=>$upstreamStatus === 'manual_review'
+            ? 'Supplier order requires manual review; do not submit a duplicate order'
+            : 'Order is processing; check order_status with the same order reference',
+        'data'=>storeBridgeProviderOrderPayload($storeOrderId),
+    ];
+}
+
+function storeBridgeReconcileSupplierProviderOrder(int $storeOrderId, bool $force = false): array
+{
+    global $conn;
+    if ($storeOrderId < 1 || !storeBridgeEnsureSchema()) {
+        return ['success'=>false,'pending'=>true,'code'=>'supplier_unavailable','message'=>'Supplier reconciliation is unavailable'];
+    }
+    $stmt = $conn->prepare("SELECT id,upstream_order_id,upstream_status,error_message,status,updated_at
+                            FROM store_api_orders WHERE id=? AND fulfillment_source='supplier' LIMIT 1");
+    if (!$stmt) return ['success'=>false,'pending'=>true,'message'=>'Unable to load Store API order'];
+    $stmt->bind_param('i', $storeOrderId);
+    $stmt->execute();
+    $r = $stmt->get_result();
+    $store = $r ? $r->fetch_assoc() : null;
+    $stmt->close();
+    if (!$store) return ['success'=>false,'pending'=>true,'message'=>'Store API supplier order not found'];
+    if ((string) ($store['status'] ?? '') === 'success') return ['success'=>true,'pending'=>false,'data'=>storeBridgeProviderOrderPayload($storeOrderId)];
+
+    $supplierOrderId = (int) ($store['upstream_order_id'] ?? 0);
+    if ($supplierOrderId < 1) {
+        $find = $conn->prepare("SELECT id FROM supplier_orders
+                                WHERE source_kind='store_api' AND source_order_id=?
+                                ORDER BY CASE WHEN status IN ('success','completed','manual_review','processing','unknown','submitting') THEN 0 ELSE 1 END ASC,id DESC LIMIT 1");
+        if ($find) {
+            $find->bind_param('i', $storeOrderId);
+            $find->execute();
+            $fr = $find->get_result();
+            $f = $fr ? $fr->fetch_assoc() : null;
+            $find->close();
+            $supplierOrderId = (int) ($f['id'] ?? 0);
+            if ($supplierOrderId > 0) storeBridgeUpdateSupplierOrderLink($storeOrderId, $supplierOrderId);
+        }
+    }
+
+    if ($supplierOrderId < 1) {
+        if (strtolower(trim((string) ($store['upstream_status'] ?? ''))) === 'refund_pending') {
+            $reason = trim((string) ($store['error_message'] ?? ''));
+            if ($reason === '') $reason = 'Supplier procurement did not start';
+            $refund = storeBridgeRefundProviderOrder($storeOrderId, $reason, 'refund_pending');
+            if (!empty($refund['success'])) {
+                return ['success'=>false,'pending'=>false,'refunded'=>true,'code'=>'upstream_unavailable_refunded',
+                    'message'=>'Supplier order was not created and the Store API balance was refunded',
+                    'data'=>$refund['data'] ?? storeBridgeProviderOrderPayload($storeOrderId)];
+            }
+            return ['success'=>false,'pending'=>true,'code'=>'refund_pending','message'=>'Supplier order was not created; automatic refund is still pending'];
+        }
+        return ['success'=>false,'pending'=>true,'code'=>'upstream_order_not_created','message'=>'Supplier order has not been created yet'];
+    }
+
+    $snapshot = storeBridgeSupplierOrderSnapshot($supplierOrderId);
+    if (!$snapshot) return ['success'=>false,'pending'=>true,'message'=>'Unable to inspect supplier order'];
+    $status = strtolower(trim((string) ($snapshot['status'] ?? '')));
+    $pendingStatuses = ['submitting','unknown','pending','processing'];
+    $protected = supplierBridgeProviderRequiresProtectedPurchase((string) ($snapshot['provider_type'] ?? ''));
+    $updatedTs = strtotime((string) ($snapshot['updated_at'] ?? ''));
+    $since = $updatedTs === false ? PHP_INT_MAX : max(0, time() - $updatedTs);
+    if (!$protected && in_array($status, $pendingStatuses, true)
+        && ($force || $since >= supplierBridgeOrderReconcileMinIntervalSeconds())) {
+        supplierBridgeReconcileOrder($supplierOrderId);
+    }
+    return storeBridgeApplySupplierOrderState($storeOrderId, $supplierOrderId);
+}
+
 function storeBridgeCatalogue(array $client): array
 {
     global $conn;
@@ -4073,7 +4517,10 @@ function storeBridgeCatalogue(array $client): array
             $unitPrices[$variantId] = $price;
         }
     }
-    $cgoSnapshots = storeBridgeCgoVariantSnapshots($variantIds, $unitPrices);
+    $cgoSnapshots = storeBridgeClientAllowsCgo($client)
+        ? storeBridgeCgoVariantSnapshots($variantIds, $unitPrices)
+        : [];
+    $supplierSnapshots = storeBridgeSupplierVariantSnapshots($client, $variantIds, $unitPrices);
 
     $products = [];
     $currency = (string) ($client['currency'] ?? storeBridgeCurrency());
@@ -4082,10 +4529,11 @@ function storeBridgeCatalogue(array $client): array
         $variantId = (int) $row['source_variant_id'];
         $localStock = max(0, (int) ($row['remote_stock'] ?? 0));
         $cgoStock = max(0, (int) (($cgoSnapshots[$variantId]['stock'] ?? 0)));
-        // Never advertise Local + CGO as one combined pool. An order must be
-        // fulfillable by one source in full so partial multi-source deliveries
-        // cannot occur if CGO later times out or rejects the request.
-        $stock = max($localStock, $cgoStock);
+        $supplierStock = max(0, (int) (($supplierSnapshots[$variantId]['stock'] ?? 0)));
+        // Never sum independent stock pools. One Store API order must be
+        // fulfillable by one source in full: LOCAL, CGO, or one permitted
+        // Store Bridge supplier connection.
+        $stock = max($localStock, $cgoStock, $supplierStock);
         $price = round((float) ($row['store_api_unit_price'] ?? 0), 2);
         $duration = trim((string) ($row['duration'] ?? 'Standard'));
         if ($duration === '') $duration = 'Standard';
@@ -4199,15 +4647,25 @@ function storeBridgeProviderInventory(array $client, string $remoteProductId): a
     $stmt->close();
     $localStock = max(0, (int) ($row['stock'] ?? 0));
     $maxKeyId = max(0, (int) ($row['max_key_id'] ?? 0));
-    $snapshots = storeBridgeCgoVariantSnapshots([$variantId], [$variantId => (float) ($product['unit_price'] ?? 0)]);
-    $cgo = $snapshots[$variantId] ?? [];
+    $cgoSnapshots = storeBridgeClientAllowsCgo($client)
+        ? storeBridgeCgoVariantSnapshots([$variantId], [$variantId => (float) ($product['unit_price'] ?? 0)])
+        : [];
+    $cgo = $cgoSnapshots[$variantId] ?? [];
     $cgoStock = max(0, (int) ($cgo['stock'] ?? 0));
-    $stock = max($localStock, $cgoStock);
+    $supplierSnapshots = storeBridgeSupplierVariantSnapshots($client, [$variantId], [$variantId => (float) ($product['unit_price'] ?? 0)]);
+    $supplier = $supplierSnapshots[$variantId] ?? [];
+    $supplierStock = max(0, (int) ($supplier['stock'] ?? 0));
+    $stock = max($localStock, $cgoStock, $supplierStock);
     $revisionParts = [
         $productId, $variantId, $localStock, $maxKeyId, $cgoStock,
         (int) ($cgo['cgo_product_id'] ?? 0),
         (string) ($cgo['inventory_checked_at'] ?? ''),
         (string) ($cgo['updated_at'] ?? ''),
+        $supplierStock,
+        (int) ($supplier['supplier_product_id'] ?? 0),
+        (int) ($supplier['connection_id'] ?? 0),
+        (string) ($supplier['inventory_checked_at'] ?? ''),
+        (string) ($supplier['updated_at'] ?? ''),
     ];
     return [
         'success' => true,
@@ -4580,6 +5038,47 @@ function storeBridgeBuildOrderEvidence(array $client, array $payload, array $res
             }
         }
 
+        if ($fulfillmentSource === 'supplier') {
+            $supplierOrderId = (int) ($order['upstream_order_id'] ?? 0);
+            if ($supplierOrderId < 1) {
+                $f = $conn->prepare("SELECT id FROM supplier_orders
+                    WHERE source_kind='store_api' AND source_order_id=?
+                    ORDER BY CASE WHEN status IN ('success','completed','manual_review','processing','unknown','submitting') THEN 0 ELSE 1 END ASC,id DESC LIMIT 1");
+                if ($f) {
+                    $f->bind_param('i', $orderId);
+                    $f->execute();
+                    $fr = $f->get_result();
+                    $found = $fr ? $fr->fetch_assoc() : null;
+                    $f->close();
+                    $supplierOrderId = (int) ($found['id'] ?? 0);
+                }
+            }
+            if ($supplierOrderId > 0) {
+                $supplier = storeBridgeSupplierOrderSnapshot($supplierOrderId);
+                if ($supplier) {
+                    $evidence['fulfillment']['upstream'] = [
+                        'provider' => substr((string)($supplier['provider_type'] ?? 'supplier'), 0, 80),
+                        'order_id' => (int)($supplier['id'] ?? 0),
+                        'source_link_valid' => (string)($supplier['source_kind'] ?? '') === 'store_api'
+                            && (int)($supplier['source_order_id'] ?? 0) === $orderId,
+                        'connection_id' => (int)($supplier['connection_id'] ?? 0),
+                        'supplier_product_id' => (int)($supplier['supplier_product_id'] ?? 0),
+                        'quantity' => (int)($supplier['quantity'] ?? 0),
+                        'status' => substr((string)($supplier['status'] ?? ''), 0, 40),
+                        'supplier_order_id' => substr((string)($supplier['supplier_order_id'] ?? ''), 0, 190),
+                        'external_ref' => substr((string)($supplier['external_ref'] ?? ''), 0, 120),
+                        'unit_cost' => round((float)($supplier['unit_cost_base'] ?? 0), 2),
+                        'total_cost' => round((float)($supplier['total_cost_base'] ?? 0), 2),
+                        'stored_key_count' => count((array)($supplier['keys'] ?? [])),
+                        'error_message' => storeBridgeDiagnosticSanitizeMessage((string)($supplier['error_message'] ?? ''), 500),
+                        'created_at' => (string)($supplier['created_at'] ?? ''),
+                        'updated_at' => (string)($supplier['updated_at'] ?? ''),
+                        'completed_at' => (string)($supplier['completed_at'] ?? ''),
+                    ];
+                }
+            }
+        }
+
         if ($billingMode === 'reseller_wallet') {
             $transactionId = (int) ($order['billing_transaction_id'] ?? 0);
             $transaction = null;
@@ -4669,6 +5168,7 @@ function storeBridgeBuildOrderEvidence(array $client, array $payload, array $res
         $evidence['integrity']['initial_debit_balance_math_valid'] = $balanceMathValid;
         $evidence['integrity']['single_source_delivery_valid'] = $keys === [] ? null : count(array_unique(array_map(static fn($k) => (string) ($k['source_type'] ?? ''), $keys))) === 1;
         $evidence['integrity']['cgo_source_link_valid'] = $fulfillmentSource !== 'cgo' ? null : (is_array($evidence['fulfillment']['upstream'] ?? null) ? !empty($evidence['fulfillment']['upstream']['source_link_valid']) : null);
+        $evidence['integrity']['supplier_source_link_valid'] = $fulfillmentSource !== 'supplier' ? null : (is_array($evidence['fulfillment']['upstream'] ?? null) ? !empty($evidence['fulfillment']['upstream']['source_link_valid']) : null);
         $completedTimestampPresent = trim((string) ($order['completed_at'] ?? '')) !== '';
         $evidence['integrity']['completed_timestamp_present'] = $completedTimestampPresent;
         if ($status !== 'success') $evidence['integrity']['success_state_consistent'] = null;
@@ -4713,8 +5213,11 @@ function storeBridgeExistingOrderResult(int $clientId, string $externalRef, stri
     $orderId = (int) $row['id'];
     if ($isLegacyIdentity) storeBridgeBackfillProviderOrderIdentity($orderId, $originSiteId, $originUserId, $customerRef);
     $status = strtolower(trim((string) ($row['status'] ?? '')));
-    if ((string) ($row['fulfillment_source'] ?? '') === 'cgo' && in_array($status, ['processing','pending','manual_review'], true)) {
+    $existingSource = strtolower(trim((string) ($row['fulfillment_source'] ?? '')));
+    if ($existingSource === 'cgo' && in_array($status, ['processing','pending','manual_review'], true)) {
         storeBridgeReconcileCgoProviderOrder($orderId, false);
+    } elseif ($existingSource === 'supplier' && in_array($status, ['processing','pending','manual_review'], true)) {
+        storeBridgeReconcileSupplierProviderOrder($orderId, false);
     }
     commerceCenterSyncSafe('store_api_sale', $orderId);
     $data = storeBridgeProviderOrderPayload($orderId);
@@ -4829,6 +5332,7 @@ function storeBridgeCreateProviderOrder(array $client, array $payload): array
     $orderId = 0;
     $fulfillmentSource = 'local';
     $cgoCandidate = null;
+    $supplierCandidates = [];
     $failureStage = 'transaction_begin';
     $transactionStarted = false;
     $commitAttempted = false;
@@ -4893,19 +5397,90 @@ function storeBridgeCreateProviderOrder(array $client, array $payload): array
             $fulfillmentReason = 'local_stock_sufficient';
             $procurementCost = round(max(0.0, (float) ($product['cost_price'] ?? 0)) * $quantity, 2);
         } else {
-            $fulfillmentSource = 'cgo';
-            $fulfillmentReason = 'local_stock_insufficient_cgo_capacity';
-            $cgoCandidate = $cgoRuntimeReady ? storeBridgeCgoCandidate($product, $quantity) : null;
-            if (!$cgoCandidate) {
-                $conn->rollback();
-                storeBridgeTimelineMark($orderTimeline, 'stock_check_failed', $operationStartedAt, ['local_locked'=>$localStockLocked,'requested'=>$quantity,'cgo_available'=>false]);
-                return $finishOrder(['success'=>false,'http_code'=>409,'code'=>'out_of_stock','message'=>'Not enough stock']);
+            $cgoCandidate = (storeBridgeClientAllowsCgo($lockedClient) && $cgoRuntimeReady)
+                ? storeBridgeCgoCandidate($product, $quantity)
+                : null;
+            if ($cgoCandidate) {
+                $fulfillmentSource = 'cgo';
+                $fulfillmentReason = 'local_stock_insufficient_cgo_capacity';
+                $procurementCost = round((float) ($cgoCandidate['cost_base'] ?? 0) * $quantity, 2);
+            } else {
+                if ($billingMode === 'reseller_wallet' && $billingUserId > 0) {
+                    // The Store API parent is committed before network procurement starts.
+                    // Block a second parent for the same reseller/variant while the first
+                    // supplier-backed parent is still processing, including the tiny gap
+                    // before its supplier child row is created.
+                    $parentBlock = $conn->prepare("SELECT id FROM store_api_orders
+                        WHERE billing_mode='reseller_wallet' AND billing_user_id=? AND source_variant_id=?
+                          AND fulfillment_source='supplier'
+                          AND status IN ('processing','pending','manual_review')
+                          AND refunded_at IS NULL
+                        ORDER BY id DESC LIMIT 1");
+                    if (!$parentBlock) throw new RuntimeException('Unable to inspect pending Store API supplier orders');
+                    $parentBlock->bind_param('ii', $billingUserId, $variantId);
+                    $parentBlock->execute();
+                    $parentBlockResult = $parentBlock->get_result();
+                    $blockingParent = $parentBlockResult ? $parentBlockResult->fetch_assoc() : null;
+                    $parentBlock->close();
+                    if ($blockingParent) {
+                        $conn->rollback();
+                        return $finishOrder([
+                            'success'=>false,'http_code'=>409,'code'=>'existing_pending_supplier_order',
+                            'message'=>'An earlier Store API supplier order for this variant is still unresolved. Resolve it before creating another order.',
+                            'data'=>['order_id'=>(int)($blockingParent['id']??0)],
+                        ]);
+                    }
+
+                    $blockingSupplier = supplierBridgeFindBlockingPendingOrder($billingUserId, $variantId, false);
+                    if ($blockingSupplier) {
+                        $conn->rollback();
+                        return $finishOrder([
+                            'success'=>false,'http_code'=>409,'code'=>'existing_pending_supplier_order',
+                            'message'=>'An earlier supplier order for this variant is still unresolved. Resolve it before creating another Store API order.',
+                        ]);
+                    }
+                } elseif ($billingMode === 'api_balance') {
+                    // API-credit clients have no linked users row. The client row is the
+                    // financial owner, so fence unresolved supplier work by client+variant.
+                    $parentBlock = $conn->prepare("SELECT id FROM store_api_orders
+                        WHERE client_id=? AND source_variant_id=?
+                          AND fulfillment_source='supplier'
+                          AND status IN ('processing','pending','manual_review')
+                          AND refunded_at IS NULL
+                        ORDER BY id DESC LIMIT 1");
+                    if (!$parentBlock) throw new RuntimeException('Unable to inspect pending Store API supplier orders');
+                    $parentBlock->bind_param('ii', $clientId, $variantId);
+                    $parentBlock->execute();
+                    $parentBlockResult = $parentBlock->get_result();
+                    $blockingParent = $parentBlockResult ? $parentBlockResult->fetch_assoc() : null;
+                    $parentBlock->close();
+                    if ($blockingParent) {
+                        $conn->rollback();
+                        return $finishOrder([
+                            'success'=>false,'http_code'=>409,'code'=>'existing_pending_supplier_order',
+                            'message'=>'An earlier Store API supplier order for this variant is still unresolved. Resolve it before creating another order.',
+                            'data'=>['order_id'=>(int)($blockingParent['id']??0)],
+                        ]);
+                    }
+                }
+                $supplierCandidates = storeBridgeSupplierCandidatesForClient($lockedClient, $product, $quantity);
+                if ($supplierCandidates !== []) {
+                    $fulfillmentSource = 'supplier';
+                    $fulfillmentReason = 'local_cgo_insufficient_supplier_capacity';
+                    $procurementCost = round((float) ($supplierCandidates[0]['cost_base'] ?? 0) * $quantity, 2);
+                } else {
+                    $conn->rollback();
+                    storeBridgeTimelineMark($orderTimeline, 'stock_check_failed', $operationStartedAt, [
+                        'local_locked'=>$localStockLocked,'requested'=>$quantity,'cgo_available'=>false,'supplier_available'=>false
+                    ]);
+                    return $finishOrder(['success'=>false,'http_code'=>409,'code'=>'out_of_stock','message'=>'Not enough stock']);
+                }
             }
-            $procurementCost = round((float) ($cgoCandidate['cost_base'] ?? 0) * $quantity, 2);
         }
         storeBridgeTimelineMark($orderTimeline, 'fulfillment_selected', $operationStartedAt, [
             'source'=>$fulfillmentSource,'reason'=>$fulfillmentReason,'local_locked'=>$localStockLocked,
             'cgo_cached_stock'=>(int) ($cgoCandidate['stock'] ?? 0),
+            'supplier_candidate_count'=>count($supplierCandidates),
         ]);
 
         $billingUserValue = $billingUserId > 0 ? $billingUserId : null;
@@ -5047,6 +5622,143 @@ function storeBridgeCreateProviderOrder(array $client, array $payload): array
         return $finishOrder(['success'=>true,'http_code'=>200,'data'=>storeBridgeProviderOrderPayload($orderId)]);
     }
 
+    if ($fulfillmentSource === 'supplier') {
+        // The Store API parent already owns the client debit and audit ledger.
+        // Supplier Bridge is invoked in procurement-only mode so it can preserve
+        // inventory verification, cost guards, protected-provider manual review,
+        // and failover without creating a second financial transaction.
+        $lastSupplierResult = [];
+        $attemptedSupplierIds = [];
+        foreach ($supplierCandidates as $candidate) {
+            $candidateProductId = (int) ($candidate['id'] ?? 0);
+            if ($candidateProductId < 1) continue;
+            $attemptedSupplierIds[] = $candidateProductId;
+            storeBridgeTimelineMark($orderTimeline, 'supplier_procurement_started', $operationStartedAt, [
+                'order_id'=>$orderId,
+                'supplier_product_id'=>$candidateProductId,
+                'connection_id'=>(int)($candidate['connection_id']??0),
+            ]);
+            try {
+                $supplierResult = supplierBridgePurchase(
+                    $candidateProductId,
+                    $billingUserId,
+                    $quantity,
+                    $productId,
+                    $variantId,
+                    false,
+                    true,
+                    'store_api',
+                    $orderId,
+                    $unitPrice
+                );
+            } catch (Throwable $e) {
+                $safe = storeBridgeDiagnosticSanitizeMessage($e->getMessage(), 1000);
+                error_log('Store API supplier procurement exception order_id='.$orderId.' supplier_product_id='.$candidateProductId.': '.$safe);
+                $supplierResult = [
+                    'success'=>false,
+                    'pending'=>true,
+                    'safe_to_failover'=>false,
+                    'code'=>'procurement_exception',
+                    'message'=>'Supplier procurement state requires reconciliation',
+                ];
+            }
+            $lastSupplierResult = $supplierResult;
+            $supplierOrderId = (int) ($supplierResult['order_id'] ?? 0);
+
+            if ($supplierOrderId > 0) {
+                $snapshot = storeBridgeSupplierOrderSnapshot($supplierOrderId);
+                $belongsToParent = $snapshot
+                    && (string)($snapshot['source_kind']??'') === 'store_api'
+                    && (int)($snapshot['source_order_id']??0) === $orderId;
+                if ($belongsToParent) {
+                    if (empty($supplierResult['success']) && !empty($supplierResult['safe_to_failover'])) {
+                        // This child definitively failed before delivery and is already
+                        // terminal/refunded in procurement-only mode. Do not apply that
+                        // child to the parent because doing so would refund the parent
+                        // before the next permitted supplier candidate is attempted.
+                        continue;
+                    }
+                    storeBridgeUpdateSupplierOrderLink($orderId, $supplierOrderId);
+                    $applied = storeBridgeApplySupplierOrderState($orderId, $supplierOrderId);
+                    storeBridgeTimelineMark($orderTimeline, 'supplier_procurement_state_applied', $operationStartedAt, [
+                        'supplier_order_id'=>$supplierOrderId,
+                        'pending'=>!empty($applied['pending']),
+                        'refunded'=>!empty($applied['refunded']),
+                    ]);
+
+                    if (!empty($applied['success']) && empty($applied['pending'])) {
+                        return $finishOrder([
+                            'success'=>true,'http_code'=>200,
+                            'data'=>storeBridgeProviderOrderPayload($orderId),
+                            'diagnostic'=>['supplier_result_code'=>substr((string)($supplierResult['code']??'success'),0,80)],
+                        ]);
+                    }
+                    if (!empty($applied['pending']) || empty($supplierResult['safe_to_failover'])) {
+                        return $finishOrder([
+                            'success'=>true,'http_code'=>202,'code'=>'processing',
+                            'message'=>'Order is processing; check order_status with the same reference and do not create a duplicate order.',
+                            'data'=>storeBridgeProviderOrderPayload($orderId),
+                            'diagnostic'=>['supplier_result_code'=>substr((string)($supplierResult['code']??''),0,80)],
+                        ]);
+                    }
+                    // A definitive child failure in procurement-only mode marks
+                    // only that child refunded. Parent billing remains reserved
+                    // while another permitted supplier candidate is tried.
+                } elseif (!empty($supplierResult['pending']) || empty($supplierResult['safe_to_failover'])) {
+                    $reason = 'Supplier procurement returned an order that could not be linked safely to the Store API parent';
+                    $u = $conn->prepare("UPDATE store_api_orders SET status='processing',upstream_status='manual_review',error_message=? WHERE id=?");
+                    if ($u) { $u->bind_param('si',$reason,$orderId); $u->execute(); $u->close(); }
+                    return $finishOrder([
+                        'success'=>true,'http_code'=>202,'code'=>'processing',
+                        'message'=>'Supplier procurement requires reconciliation. Do not create a duplicate order.',
+                        'data'=>storeBridgeProviderOrderPayload($orderId),
+                    ]);
+                }
+            } elseif (!empty($supplierResult['pending']) || empty($supplierResult['safe_to_failover'])) {
+                $reason = storeBridgeDiagnosticSanitizeMessage((string)($supplierResult['message']??'Supplier procurement requires reconciliation'),1000);
+                $u = $conn->prepare("UPDATE store_api_orders SET status='processing',upstream_status='manual_review',error_message=? WHERE id=?");
+                if ($u) { $u->bind_param('si',$reason,$orderId); $u->execute(); $u->close(); }
+                return $finishOrder([
+                    'success'=>true,'http_code'=>202,'code'=>'processing',
+                    'message'=>'Supplier procurement requires reconciliation. Do not create a duplicate order.',
+                    'data'=>storeBridgeProviderOrderPayload($orderId),
+                    'diagnostic'=>['supplier_result_code'=>substr((string)($supplierResult['code']??''),0,80)],
+                ]);
+            }
+            // safe_to_failover=true means this candidate proved no upstream
+            // delivery exists and its child (if any) is already terminal.
+        }
+
+        $reason = storeBridgeDiagnosticSanitizeMessage(
+            (string)($lastSupplierResult['message'] ?? 'No permitted supplier could fulfill this order'),
+            1000
+        );
+        $refund = storeBridgeRefundProviderOrder(
+            $orderId,
+            $reason,
+            substr((string)($lastSupplierResult['code'] ?? 'supplier_candidates_exhausted'),0,40)
+        );
+        if (!empty($refund['success'])) {
+            return $finishOrder([
+                'success'=>false,'http_code'=>409,'code'=>'upstream_unavailable_refunded',
+                'message'=>'No permitted supplier could fulfill the order; Store API balance was refunded.',
+                'data'=>storeBridgeProviderOrderPayload($orderId),
+                'diagnostic'=>[
+                    'supplier_result_code'=>substr((string)($lastSupplierResult['code']??''),0,80),
+                    'supplier_products_attempted'=>$attemptedSupplierIds,
+                ],
+            ]);
+        }
+        $u = $conn->prepare("UPDATE store_api_orders SET status='processing',upstream_status='refund_pending',error_message=? WHERE id=?");
+        if ($u) { $u->bind_param('si',$reason,$orderId); $u->execute(); $u->close(); }
+        return $finishOrder([
+            'success'=>true,'http_code'=>202,'code'=>'refund_pending',
+            'message'=>'Supplier procurement failed safely, but the Store API refund is still being reconciled. Do not create a duplicate order.',
+            'data'=>storeBridgeProviderOrderPayload($orderId),
+            'diagnostic'=>['supplier_products_attempted'=>$attemptedSupplierIds],
+        ]);
+    }
+
     // Network procurement happens only after the Store API debit/order reserve
     // is durably committed. CGO external mode never performs a second debit.
     storeBridgeTimelineMark($orderTimeline, 'cgo_procurement_started', $operationStartedAt, ['order_id'=>$orderId,'cgo_product_id'=>(int)($cgoCandidate['cgo_product_id']??0)]);
@@ -5129,8 +5841,11 @@ function storeBridgeProviderOrderStatus(array $client, array $payload): array
     if(!$row)return ['success'=>false,'http_code'=>404,'code'=>'order_not_found','message'=>'Order not found'];
     $resolvedOrderId=(int)$row['id'];
     $status=strtolower(trim((string)($row['status']??'')));
-    if((string)($row['fulfillment_source']??'')==='cgo' && in_array($status,['processing','pending','manual_review'],true)) {
+    $statusSource = strtolower(trim((string)($row['fulfillment_source']??'')));
+    if($statusSource==='cgo' && in_array($status,['processing','pending','manual_review'],true)) {
         storeBridgeReconcileCgoProviderOrder($resolvedOrderId,false);
+    } elseif($statusSource==='supplier' && in_array($status,['processing','pending','manual_review'],true)) {
+        storeBridgeReconcileSupplierProviderOrder($resolvedOrderId,false);
     }
     commerceCenterSyncSafe('store_api_sale',$resolvedOrderId);
     return ['success'=>true,'http_code'=>200,'data'=>storeBridgeProviderOrderPayload($resolvedOrderId)];
@@ -5450,7 +6165,20 @@ function supplierBridgeProviderTypes(): array
             'label_th' => 'Sakazuki Store API v1',
             'label_en' => 'Sakazuki Store API v1',
         ],
+        'vipstore_v1' => [
+            'label_th' => 'VIPSTORE v1',
+            'label_en' => 'VIPSTORE v1',
+        ],
+        'starkmods_v1' => [
+            'label_th' => 'StarkMods Web Session v1',
+            'label_en' => 'StarkMods Web Session v1',
+        ],
     ];
+}
+
+function supplierBridgeProviderRequiresProtectedPurchase(string $providerType): bool
+{
+    return in_array(strtolower(trim($providerType)), ['vipstore_v1', 'starkmods_v1'], true);
 }
 
 function storeBridgeCurrentBaseUrl(): string
@@ -5504,6 +6232,30 @@ function supplierBridgeProductPriceModes(): array
     return ['connection', 'source', 'markup', 'fixed', 'keep'];
 }
 
+function supplierBridgePurchaseModes(): array
+{
+    return ['disabled', 'test', 'live'];
+}
+
+function supplierBridgeConnectionAllowsPurchase(array $row, int $userId = 0): bool
+{
+    $mode = strtolower(trim((string) ($row['purchase_mode'] ?? 'live')));
+    if ($mode === 'live') return true;
+    if ($mode !== 'test' || $userId < 1) return false;
+    static $adminCache = [];
+    if (array_key_exists($userId, $adminCache)) return $adminCache[$userId];
+    global $conn;
+    if (!isset($conn) || !($conn instanceof mysqli)) return $adminCache[$userId] = false;
+    $stmt = $conn->prepare('SELECT role FROM users WHERE id=? LIMIT 1');
+    if (!$stmt) return $adminCache[$userId] = false;
+    $stmt->bind_param('i', $userId);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    $user = $result ? $result->fetch_assoc() : null;
+    $stmt->close();
+    return $adminCache[$userId] = strtolower(trim((string) ($user['role'] ?? ''))) === 'admin';
+}
+
 function supplierBridgeCreateConnection(array $input, int $adminId): array
 {
     global $conn;
@@ -5513,7 +6265,16 @@ function supplierBridgeCreateConnection(array $input, int $adminId): array
     $endpoint = trim((string) ($input['endpoint_url'] ?? ''));
     $apiKey = trim((string) ($input['api_key'] ?? ''));
     $priority = (int) ($input['priority'] ?? 100);
+    $purchaseModeDefault = supplierBridgeProviderRequiresProtectedPurchase($providerType) ? 'disabled' : 'live';
+    $purchaseMode = strtolower(trim((string) ($input['purchase_mode'] ?? $purchaseModeDefault)));
     $autoPublish = !empty($input['auto_publish']) ? 1 : 0;
+    if (supplierBridgeProviderRequiresProtectedPurchase($providerType)) {
+        // Non-idempotent session-based suppliers always start fenced. An
+        // administrator must explicitly move the saved connection to test or
+        // live after mapping and cost guards have been reviewed.
+        $purchaseMode = 'disabled';
+        $autoPublish = 0;
+    }
     $syncDetails = !empty($input['sync_details']) ? 1 : 0;
     $syncPrices = !empty($input['sync_prices']) ? 1 : 0;
     $userMode = strtolower(trim((string) ($input['user_price_mode'] ?? 'source')));
@@ -5526,6 +6287,7 @@ function supplierBridgeCreateConnection(array $input, int $adminId): array
     if (!supplierBridgeValidateEndpoint($endpoint)) return ['success' => false, 'message' => 'Endpoint must be a valid public HTTPS URL'];
     if (supplierBridgeEndpointTargetsCurrentSite($endpoint)) return ['success' => false, 'message' => 'A website cannot use its own Store API as an upstream supplier'];
     if ($apiKey === '' || strlen($apiKey) > 500) return ['success' => false, 'message' => 'API key is invalid'];
+    if (!in_array($purchaseMode, supplierBridgePurchaseModes(), true)) return ['success' => false, 'message' => 'Purchase mode is invalid'];
     if (!in_array($userMode, supplierBridgeConnectionPriceModes(), true) || !in_array($resellerMode, supplierBridgeConnectionPriceModes(), true)) return ['success' => false, 'message' => 'Default price mode is invalid'];
     if (!is_finite($userMarkup) || !is_finite($resellerMarkup) || $userMarkup < 0 || $resellerMarkup < 0 || $userMarkup > 10000 || $resellerMarkup > 10000) {
         return ['success' => false, 'message' => 'Markup is invalid'];
@@ -5534,10 +6296,10 @@ function supplierBridgeCreateConnection(array $input, int $adminId): array
     if ($cipher === null) return ['success' => false, 'message' => 'Unable to encrypt API key. Check private directory permissions or STORE_BRIDGE_ENCRYPTION_KEY.'];
     $priority = max(-100000, min(100000, $priority));
     $stmt = $conn->prepare("INSERT INTO supplier_connections
-        (name, provider_type, endpoint_url, api_key_ciphertext, priority, auto_publish, sync_details, sync_prices, user_price_mode, reseller_price_mode, user_markup_percent, reseller_markup_percent, protect_below_cost, created_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        (name, provider_type, purchase_mode, endpoint_url, api_key_ciphertext, priority, auto_publish, sync_details, sync_prices, user_price_mode, reseller_price_mode, user_markup_percent, reseller_markup_percent, protect_below_cost, created_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
     if (!$stmt) return ['success' => false, 'message' => 'Unable to prepare supplier connection'];
-    $stmt->bind_param('ssssiiiissddii', $name, $providerType, $endpoint, $cipher, $priority, $autoPublish, $syncDetails, $syncPrices, $userMode, $resellerMode, $userMarkup, $resellerMarkup, $protectBelowCost, $adminId);
+    $stmt->bind_param('sssssiiiissddii', $name, $providerType, $purchaseMode, $endpoint, $cipher, $priority, $autoPublish, $syncDetails, $syncPrices, $userMode, $resellerMode, $userMarkup, $resellerMarkup, $protectBelowCost, $adminId);
     $ok = $stmt->execute();
     $id = (int) $conn->insert_id;
     $stmt->close();
@@ -5548,10 +6310,14 @@ function supplierBridgeUpdateConnection(int $id, array $input): array
 {
     global $conn;
     if ($id < 1 || !storeBridgeEnsureSchema()) return ['success' => false, 'message' => 'Invalid supplier connection'];
+    $current = supplierBridgeGetConnection($id);
+    if (!$current) return ['success' => false, 'message' => 'Supplier connection was not found'];
     $name = trim((string) ($input['name'] ?? ''));
     $endpoint = trim((string) ($input['endpoint_url'] ?? ''));
     $apiKey = trim((string) ($input['api_key'] ?? ''));
     $priority = max(-100000, min(100000, (int) ($input['priority'] ?? 100)));
+    $purchaseModeInput = strtolower(trim((string) ($input['purchase_mode'] ?? '')));
+    $purchaseMode = $purchaseModeInput !== '' ? $purchaseModeInput : strtolower(trim((string) ($current['purchase_mode'] ?? 'live')));
     $autoPublish = !empty($input['auto_publish']) ? 1 : 0;
     $syncDetails = !empty($input['sync_details']) ? 1 : 0;
     $syncPrices = !empty($input['sync_prices']) ? 1 : 0;
@@ -5561,18 +6327,19 @@ function supplierBridgeUpdateConnection(int $id, array $input): array
     $resellerMarkup = round((float) ($input['reseller_markup_percent'] ?? 10), 2);
     $protectBelowCost = !empty($input['protect_below_cost']) ? 1 : 0;
     if ($name === '' || strlen($name) > 190 || !supplierBridgeValidateEndpoint($endpoint) || supplierBridgeEndpointTargetsCurrentSite($endpoint)) return ['success' => false, 'message' => 'Connection settings are invalid or point back to this website'];
+    if (!in_array($purchaseMode, supplierBridgePurchaseModes(), true)) return ['success' => false, 'message' => 'Purchase mode is invalid'];
     if (!in_array($userMode, supplierBridgeConnectionPriceModes(), true) || !in_array($resellerMode, supplierBridgeConnectionPriceModes(), true)) return ['success' => false, 'message' => 'Default price mode is invalid'];
     if (!is_finite($userMarkup) || !is_finite($resellerMarkup) || $userMarkup < 0 || $resellerMarkup < 0 || $userMarkup > 10000 || $resellerMarkup > 10000) return ['success' => false, 'message' => 'Markup is invalid'];
     if ($apiKey !== '') {
         $cipher = storeBridgeEncryptSecret($apiKey);
         if ($cipher === null) return ['success' => false, 'message' => 'Unable to encrypt API key'];
-        $stmt = $conn->prepare('UPDATE supplier_connections SET name=?,endpoint_url=?,api_key_ciphertext=?,priority=?,auto_publish=?,sync_details=?,sync_prices=?,user_price_mode=?,reseller_price_mode=?,user_markup_percent=?,reseller_markup_percent=?,protect_below_cost=? WHERE id=?');
+        $stmt = $conn->prepare('UPDATE supplier_connections SET name=?,endpoint_url=?,api_key_ciphertext=?,purchase_mode=?,priority=?,auto_publish=?,sync_details=?,sync_prices=?,user_price_mode=?,reseller_price_mode=?,user_markup_percent=?,reseller_markup_percent=?,protect_below_cost=? WHERE id=?');
         if (!$stmt) return ['success' => false, 'message' => 'Unable to prepare supplier update'];
-        $stmt->bind_param('sssiiiissddii', $name, $endpoint, $cipher, $priority, $autoPublish, $syncDetails, $syncPrices, $userMode, $resellerMode, $userMarkup, $resellerMarkup, $protectBelowCost, $id);
+        $stmt->bind_param('ssssiiiissddii', $name, $endpoint, $cipher, $purchaseMode, $priority, $autoPublish, $syncDetails, $syncPrices, $userMode, $resellerMode, $userMarkup, $resellerMarkup, $protectBelowCost, $id);
     } else {
-        $stmt = $conn->prepare('UPDATE supplier_connections SET name=?,endpoint_url=?,priority=?,auto_publish=?,sync_details=?,sync_prices=?,user_price_mode=?,reseller_price_mode=?,user_markup_percent=?,reseller_markup_percent=?,protect_below_cost=? WHERE id=?');
+        $stmt = $conn->prepare('UPDATE supplier_connections SET name=?,endpoint_url=?,purchase_mode=?,priority=?,auto_publish=?,sync_details=?,sync_prices=?,user_price_mode=?,reseller_price_mode=?,user_markup_percent=?,reseller_markup_percent=?,protect_below_cost=? WHERE id=?');
         if (!$stmt) return ['success' => false, 'message' => 'Unable to prepare supplier update'];
-        $stmt->bind_param('ssiiiissddii', $name, $endpoint, $priority, $autoPublish, $syncDetails, $syncPrices, $userMode, $resellerMode, $userMarkup, $resellerMarkup, $protectBelowCost, $id);
+        $stmt->bind_param('sssiiiissddii', $name, $endpoint, $purchaseMode, $priority, $autoPublish, $syncDetails, $syncPrices, $userMode, $resellerMode, $userMarkup, $resellerMarkup, $protectBelowCost, $id);
     }
     $ok = $stmt->execute();
     $stmt->close();
@@ -5881,6 +6648,31 @@ function supplierBridgeApiRequestOnce(
     if (!supplierBridgeValidateEndpoint($endpoint)) {
         return $finalize(['ok' => false, 'http_code' => 0, 'transport_error' => false, 'error_code' => 'endpoint_invalid', 'error' => 'Supplier endpoint configuration is invalid', 'data' => null]);
     }
+    $ciphertext = (string) ($connection['api_key_ciphertext'] ?? '');
+    $key = storeBridgeDecryptSecret($ciphertext);
+    if ($key === null) {
+        return $finalize(['ok' => false, 'http_code' => 0, 'transport_error' => false, 'error_code' => 'credential_decryption_failed', 'error' => 'Supplier API credential cannot be decrypted', 'data' => null]);
+    }
+    // Session-based suppliers own their verified endpoint map and must
+    // distinguish failures before purchase from failures after the
+    // non-idempotent purchase request. Dispatch before the generic Sakazuki
+    // DNS/request builder so each adapter owns that boundary precisely.
+    if ($providerType === 'vipstore_v1') {
+        $vipResult = supplierBridgeVipstoreApiRequest($connection, $action, $method, $payload, $key, $connectTimeout, $requestTimeout);
+        $httpCode = (int) ($vipResult['http_code'] ?? 0);
+        $decoded = is_array($vipResult['data'] ?? null) ? $vipResult['data'] : null;
+        return $finalize($vipResult, $decoded);
+    }
+    if ($providerType === 'starkmods_v1') {
+        $starkmodsResult = supplierBridgeStarkmodsApiRequest($connection, $action, $method, $payload, $key, $connectTimeout, $requestTimeout);
+        $httpCode = (int) ($starkmodsResult['http_code'] ?? 0);
+        $decoded = is_array($starkmodsResult['data'] ?? null) ? $starkmodsResult['data'] : null;
+        return $finalize($starkmodsResult, $decoded);
+    }
+    if (!function_exists('curl_init')) {
+        return $finalize(['ok' => false, 'http_code' => 0, 'transport_error' => false, 'error_code' => 'curl_unavailable', 'error' => 'PHP cURL is unavailable', 'data' => null]);
+    }
+
     $resolvedTarget = storeBridgeResolvePublicHttpsTarget($endpoint, 'Supplier endpoint');
     if (empty($resolvedTarget['success'])) {
         return $finalize([
@@ -5897,14 +6689,6 @@ function supplierBridgeApiRequestOnce(
     $pinnedTargetIp = (string) ($resolvedTargetIps[0] ?? '');
     if ($resolvedTargetHost === '' || $pinnedTargetIp === '') {
         return $finalize(['ok' => false, 'http_code' => 0, 'transport_error' => false, 'error_code' => 'dns_resolution_failed', 'error' => 'Supplier endpoint has no usable public IP address', 'data' => null]);
-    }
-    $ciphertext = (string) ($connection['api_key_ciphertext'] ?? '');
-    $key = storeBridgeDecryptSecret($ciphertext);
-    if ($key === null) {
-        return $finalize(['ok' => false, 'http_code' => 0, 'transport_error' => false, 'error_code' => 'credential_decryption_failed', 'error' => 'Supplier API credential cannot be decrypted', 'data' => null]);
-    }
-    if (!function_exists('curl_init')) {
-        return $finalize(['ok' => false, 'http_code' => 0, 'transport_error' => false, 'error_code' => 'curl_unavailable', 'error' => 'PHP cURL is unavailable', 'data' => null]);
     }
 
     $url = $endpoint;
@@ -7199,6 +7983,10 @@ function supplierBridgePublishProduct(array $connection, array $supplierProduct,
     $syncDuration = 1;
     $syncProductDetails = 1;
     $categoryOverride = [];
+    $defaultMaxSupplierCost = supplierBridgeProviderRequiresProtectedPurchase((string) ($connection['provider_type'] ?? ''))
+        && is_numeric($supplierProduct['cost_base'] ?? null)
+        ? round((float) $supplierProduct['cost_base'] + 2.0, 2)
+        : null;
 
     ensureProductCategoryLinksTable();
     ensureCategoriesTable();
@@ -7417,6 +8205,13 @@ function supplierBridgePublishProduct(array $connection, array $supplierProduct,
                 $updateVariant->close();
             }
         }
+        if ($defaultMaxSupplierCost !== null && $localVariantId > 0) {
+            $maxCostStmt = $conn->prepare('UPDATE supplier_catalog_links SET max_supplier_cost=CASE WHEN max_supplier_cost IS NULL OR max_supplier_cost<=0 THEN ? ELSE max_supplier_cost END WHERE supplier_product_id=?');
+            if (!$maxCostStmt) throw new RuntimeException('Unable to prepare automatic max supplier cost');
+            $maxCostStmt->bind_param('di', $defaultMaxSupplierCost, $supplierProductId);
+            if (!$maxCostStmt->execute()) { $maxCostStmt->close(); throw new RuntimeException('Unable to save automatic max supplier cost'); }
+            $maxCostStmt->close();
+        }
         $conn->commit();
         return [
             'success' => true,
@@ -7434,14 +8229,21 @@ function supplierBridgePublishProduct(array $connection, array $supplierProduct,
 }
 
 /**
- * Sakazuki v1 can explicitly prove that an order never became durable. Only
- * trust this signal when HTTPS returned parseable JSON from the expected
- * Sakazuki protocol and both safety flags are present. Generic HTTP 5xx remains
- * ambiguous because an upstream may have committed before the response failed.
+ * Providers may explicitly prove that an order never became durable.
+ *
+ * Sakazuki supplies this proof in the upstream response. Session-based
+ * suppliers without verified purchase history set an internal top-level proof
+ * only while execution is still before the non-idempotent purchase request.
+ * Preflight failures may therefore be safe to refund/fail over, but a lost or
+ * malformed response after purchase must go to manual review.
  */
 function supplierBridgeProviderProvesOrderNotCreated(array $connection, array $api): bool
 {
-    if (strtolower(trim((string) ($connection['provider_type'] ?? ''))) !== 'sakazuki_v1') return false;
+    $providerType = strtolower(trim((string) ($connection['provider_type'] ?? '')));
+    if (supplierBridgeProviderRequiresProtectedPurchase($providerType)) {
+        return ($api['order_not_created_proven'] ?? null) === true;
+    }
+    if ($providerType !== 'sakazuki_v1') return false;
     if (!empty($api['transport_error']) || (int) ($api['http_code'] ?? 0) < 400) return false;
     $data = is_array($api['data'] ?? null) ? $api['data'] : null;
     if (!is_array($data) || (($data['success'] ?? null) !== false)) return false;
@@ -7562,6 +8364,7 @@ function supplierBridgeExtractInventoryResponse(array $response, string $expecte
     if (isset($payload['data']) && is_array($payload['data'])) $payload = $payload['data'];
     $productId = trim((string) ($payload['product_id'] ?? $payload['remote_product_id'] ?? ''));
     $stockValue = $payload['stock'] ?? $payload['available_stock'] ?? null;
+    $costValue = $payload['api_cost'] ?? $payload['price'] ?? $payload['unit_price'] ?? null;
     if ($productId === '' || !hash_equals($expectedRemoteProductId, $productId) || !is_numeric($stockValue)) return null;
     $stock = max(0, (int) $stockValue);
     $status = strtolower(trim((string) ($payload['status'] ?? ($stock > 0 ? 'available' : 'out_of_stock'))));
@@ -7573,6 +8376,7 @@ function supplierBridgeExtractInventoryResponse(array $response, string $expecte
         'confirmed_at' => trim((string) ($payload['confirmed_at'] ?? '')),
         'revision' => substr(trim((string) ($payload['revision'] ?? '')), 0, 190),
         'currency' => substr(strtoupper(trim((string) ($payload['currency'] ?? ''))), 0, 3),
+        'cost_base' => is_numeric($costValue) ? round(max(0.0, (float) $costValue), 2) : null,
     ];
 }
 
@@ -7709,6 +8513,28 @@ function supplierBridgeConfirmProductInventory(int $supplierProductId, int $quan
         return ['success' => false, 'confirmed' => false, 'error_code' => $errorCode, 'failure_class' => 'local_database', 'message' => $message];
     }
 
+    if (isset($inventory['cost_base']) && is_numeric($inventory['cost_base'])) {
+        $currentCost = round(max(0.0, (float) $inventory['cost_base']), 2);
+        $costUpdate = $conn->prepare('UPDATE supplier_products SET cost_base=? WHERE id=? AND connection_id=?');
+        if (!$costUpdate) {
+            $errorCode = 'inventory_cost_db_prepare_failed';
+            $message = 'Unable to prepare current supplier cost update';
+            supplierBridgeRecordInventoryFailure($supplierProductId, $errorCode, $message);
+            supplierBridgeLogInventoryCheck($connectionId, $supplierProductId, $remoteProductId, 'exact', $quantity, false, $stock, (int) ($api['http_code'] ?? 200), $errorCode, $message, $durationMs);
+            return ['success' => false, 'confirmed' => false, 'error_code' => $errorCode, 'failure_class' => 'local_database', 'message' => $message];
+        }
+        $costUpdate->bind_param('dii', $currentCost, $supplierProductId, $connectionId);
+        $costSaved = $costUpdate->execute();
+        $costError = $costUpdate->error;
+        $costUpdate->close();
+        if (!$costSaved) {
+            $errorCode = 'inventory_cost_db_update_failed';
+            $message = $costError !== '' ? ('Unable to save current supplier cost: ' . $costError) : 'Unable to save current supplier cost';
+            supplierBridgeRecordInventoryFailure($supplierProductId, $errorCode, $message);
+            supplierBridgeLogInventoryCheck($connectionId, $supplierProductId, $remoteProductId, 'exact', $quantity, false, $stock, (int) ($api['http_code'] ?? 200), $errorCode, $message, $durationMs);
+            return ['success' => false, 'confirmed' => false, 'error_code' => $errorCode, 'failure_class' => 'local_database', 'message' => $message];
+        }
+    }
     supplierBridgeLogInventoryCheck($connectionId, $supplierProductId, $remoteProductId, 'exact', $quantity, true, $stock, (int) ($api['http_code'] ?? 200), '', '', $durationMs);
     return [
         'success' => true,
@@ -7765,7 +8591,9 @@ function supplierBridgeRefreshConnectionUnlocked(int $connectionId, bool $force 
     }
     if (!$force && $requiredRemoteProductId === '' && !empty($connection['last_success_at'])) {
         $age = time() - (int) strtotime((string) $connection['last_success_at']);
-        if ($age >= 0 && $age < 30) return ['success' => true, 'cached' => true, 'updated' => 0, 'target_confirmed' => false];
+        $providerType = strtolower(trim((string) ($connection['provider_type'] ?? '')));
+        $minimumRefreshAge = $providerType === 'starkmods_v1' ? 180 : 30;
+        if ($age >= 0 && $age < $minimumRefreshAge) return ['success' => true, 'cached' => true, 'updated' => 0, 'target_confirmed' => false];
     }
 
     $api = supplierBridgeApiRequest($connection, 'products', 'GET');
@@ -7965,17 +8793,28 @@ function supplierBridgeRefreshConnectionUnlocked(int $connectionId, bool $force 
         ];
     }
 
-    $balanceApi = supplierBridgeApiRequest($connection, 'balance', 'GET');
     $balance = null;
     $currency = null;
     $balanceError = '';
-    if (!empty($balanceApi['ok']) && is_array($balanceApi['data'] ?? null)) {
-        $balanceValue = $balanceApi['data']['balance'] ?? $balanceApi['data']['data']['balance'] ?? null;
-        $currencyValue = $balanceApi['data']['currency'] ?? $balanceApi['data']['data']['currency'] ?? null;
-        if (is_numeric($balanceValue)) $balance = round((float) $balanceValue, 2);
-        if (is_scalar($currencyValue)) $currency = substr(strtoupper(trim((string) $currencyValue)), 0, 3);
+    $providerType = strtolower(trim((string) ($connection['provider_type'] ?? '')));
+    $catalogueBalance = $api['data']['balance'] ?? null;
+    $catalogueCurrency = $api['data']['currency'] ?? null;
+    if ($providerType === 'starkmods_v1' && is_numeric($catalogueBalance)) {
+        // StarkMods renders balance and catalogue in the same authenticated HTML
+        // page. Reuse that snapshot so the one-minute sync does not log in and
+        // download the full catalogue twice.
+        $balance = round((float) $catalogueBalance, 2);
+        if (is_scalar($catalogueCurrency)) $currency = substr(strtoupper(trim((string) $catalogueCurrency)), 0, 3);
     } else {
-        $balanceError = substr((string) ($balanceApi['error'] ?? 'Balance refresh failed'), 0, 500);
+        $balanceApi = supplierBridgeApiRequest($connection, 'balance', 'GET');
+        if (!empty($balanceApi['ok']) && is_array($balanceApi['data'] ?? null)) {
+            $balanceValue = $balanceApi['data']['balance'] ?? $balanceApi['data']['data']['balance'] ?? null;
+            $currencyValue = $balanceApi['data']['currency'] ?? $balanceApi['data']['data']['currency'] ?? null;
+            if (is_numeric($balanceValue)) $balance = round((float) $balanceValue, 2);
+            if (is_scalar($currencyValue)) $currency = substr(strtoupper(trim((string) $currencyValue)), 0, 3);
+        } else {
+            $balanceError = substr((string) ($balanceApi['error'] ?? 'Balance refresh failed'), 0, 500);
+        }
     }
 
     $partial = $failed > 0 || $publishFailed > 0 || $invalidRows > 0 || $truncated;
@@ -8087,11 +8926,12 @@ function supplierBridgeGetSupplierProduct(int $supplierProductId): ?array
     return $row;
 }
 
-function supplierBridgeGetManagedProducts(array $filters = [], int $limit = 500): array
+function supplierBridgeGetManagedProducts(array $filters = [], int $limit = 500, int $offset = 0): array
 {
     global $conn;
     if (!storeBridgeEnsureSchema()) return [];
     $limit = max(1, min(2000, $limit));
+    $offset = max(0, $offset);
     $where = ['1=1'];
 
     $connectionId = max(0, (int) ($filters['connection_id'] ?? 0));
@@ -8130,7 +8970,7 @@ function supplierBridgeGetManagedProducts(array $filters = [], int $limit = 500)
                    c.user_markup_percent AS connection_user_markup_percent,
                    c.reseller_markup_percent AS connection_reseller_markup_percent,
                    c.protect_below_cost,c.sync_prices,c.priority AS connection_priority,
-                   l.local_product_id,l.local_variant_id,l.api_fallback_enabled,l.source_priority,l.sync_duration,
+                   l.local_product_id,l.local_variant_id,l.api_fallback_enabled,l.source_priority,l.max_supplier_cost,l.sync_duration,
                    scp.local_product_id AS group_local_product_id,
                    scp.sync_details AS group_sync_details,scp.local_categories_override_json AS group_category_override_json,
                    lp.name AS local_product_name,lp.status AS local_product_status,
@@ -8149,7 +8989,7 @@ function supplierBridgeGetManagedProducts(array $filters = [], int $limit = 500)
             ORDER BY CASE WHEN sp.supplier_removed_at IS NOT NULL THEN 2
                           WHEN sp.remote_stock>0 THEN 0 ELSE 1 END,
                      c.priority ASC,sp.name ASC,sp.remote_source_product_id ASC,sp.id ASC
-            LIMIT {$limit}";
+            LIMIT {$limit} OFFSET {$offset}";
     $result = $conn->query($sql);
     $rows = $result ? $result->fetch_all(MYSQLI_ASSOC) : [];
     foreach ($rows as &$row) {
@@ -8253,7 +9093,7 @@ function supplierBridgeGetLocalCatalog(): array
                    pv.cost_price,pv.status AS variant_status
             FROM products p
             LEFT JOIN product_admin_archives paa ON paa.product_id=p.id
-            JOIN product_variants pv ON pv.product_id=p.id
+            LEFT JOIN product_variants pv ON pv.product_id=p.id
             LEFT JOIN product_variant_admin_archives pva ON pva.variant_id=pv.id
             LEFT JOIN (
                 SELECT product_id,GROUP_CONCAT(category ORDER BY id SEPARATOR '||') AS categories_concat
@@ -8771,12 +9611,21 @@ function supplierBridgeMapGroupToLocalProduct(int $connectionId, string $sourceR
     return ['success' => true, 'published' => $published, 'moved' => $moved, 'skipped_manual' => $skippedManual];
 }
 
-function supplierBridgeLinkVariantToLocal(int $supplierProductId, int $localVariantId, int $sourcePriority = 100): array
+function supplierBridgeLinkVariantToLocal(int $supplierProductId, int $localVariantId, int $sourcePriority = 100, ?float $maxSupplierCost = null): array
 {
     global $conn;
     $product = supplierBridgeGetSupplierProduct($supplierProductId);
     if (!$product || $localVariantId < 1 || isProductVariantAdminArchived($localVariantId)) return ['success' => false, 'message' => 'Supplier product or local variant was not found'];
     $sourcePriority = max(-100000, min(100000, $sourcePriority));
+    if ($maxSupplierCost === null
+        && supplierBridgeProviderRequiresProtectedPurchase((string) ($product['provider_type'] ?? ''))
+        && is_numeric($product['cost_base'] ?? null)) {
+        $maxSupplierCost = round((float) $product['cost_base'] + 2.0, 2);
+    }
+    if ($maxSupplierCost !== null) {
+        if (!is_finite($maxSupplierCost) || $maxSupplierCost <= 0) return ['success' => false, 'message' => 'Max supplier cost must be greater than zero'];
+        $maxSupplierCost = round($maxSupplierCost, 2);
+    }
     $variantStmt = $conn->prepare('SELECT id,product_id FROM product_variants WHERE id=? LIMIT 1');
     if (!$variantStmt) return ['success' => false, 'message' => 'Unable to inspect local variant'];
     $variantStmt->bind_param('i', $localVariantId);
@@ -8800,9 +9649,15 @@ function supplierBridgeLinkVariantToLocal(int $supplierProductId, int $localVari
         $map->bind_param('isi', $connectionId, $sourceRef, $localProductId);
         if (!$map->execute()) { $map->close(); throw new RuntimeException('Unable to save group mapping'); }
         $map->close();
-        $link = $conn->prepare('INSERT INTO supplier_catalog_links (supplier_product_id,local_product_id,local_variant_id,api_fallback_enabled,source_priority,sync_duration) VALUES (?,?,?,1,?,0) ON DUPLICATE KEY UPDATE local_product_id=VALUES(local_product_id),local_variant_id=VALUES(local_variant_id),api_fallback_enabled=1,source_priority=VALUES(source_priority),sync_duration=0');
-        if (!$link) throw new RuntimeException('Unable to prepare variant mapping');
-        $link->bind_param('iiii', $supplierProductId, $localProductId, $localVariantId, $sourcePriority);
+        if ($maxSupplierCost === null) {
+            $link = $conn->prepare('INSERT INTO supplier_catalog_links (supplier_product_id,local_product_id,local_variant_id,api_fallback_enabled,source_priority,max_supplier_cost,sync_duration) VALUES (?,?,?,1,?,NULL,0) ON DUPLICATE KEY UPDATE local_product_id=VALUES(local_product_id),local_variant_id=VALUES(local_variant_id),api_fallback_enabled=1,source_priority=VALUES(source_priority),max_supplier_cost=NULL,sync_duration=0');
+            if (!$link) throw new RuntimeException('Unable to prepare variant mapping');
+            $link->bind_param('iiii', $supplierProductId, $localProductId, $localVariantId, $sourcePriority);
+        } else {
+            $link = $conn->prepare('INSERT INTO supplier_catalog_links (supplier_product_id,local_product_id,local_variant_id,api_fallback_enabled,source_priority,max_supplier_cost,sync_duration) VALUES (?,?,?,1,?,?,0) ON DUPLICATE KEY UPDATE local_product_id=VALUES(local_product_id),local_variant_id=VALUES(local_variant_id),api_fallback_enabled=1,source_priority=VALUES(source_priority),max_supplier_cost=VALUES(max_supplier_cost),sync_duration=0');
+            if (!$link) throw new RuntimeException('Unable to prepare variant mapping');
+            $link->bind_param('iiiid', $supplierProductId, $localProductId, $localVariantId, $sourcePriority, $maxSupplierCost);
+        }
         if (!$link->execute()) { $link->close(); throw new RuntimeException('Unable to save variant mapping'); }
         $link->close();
         $conn->commit();
@@ -8811,6 +9666,26 @@ function supplierBridgeLinkVariantToLocal(int $supplierProductId, int $localVari
         return ['success' => false, 'message' => $e->getMessage()];
     }
     return supplierBridgePublishById($supplierProductId, true);
+}
+
+function supplierBridgeBackfillMaxSupplierCosts(int $connectionId, float $margin = 2.0): array
+{
+    global $conn;
+    if ($connectionId < 1 || !storeBridgeEnsureSchema()) return ['success' => false, 'updated' => 0, 'message' => 'Supplier connection is invalid'];
+    $margin = round(max(0.01, min(1000000, $margin)), 2);
+    $stmt = $conn->prepare("UPDATE supplier_catalog_links scl
+        JOIN supplier_products sp ON sp.id=scl.supplier_product_id
+        JOIN supplier_connections c ON c.id=sp.connection_id
+        SET scl.max_supplier_cost=ROUND(sp.cost_base + ?, 2)
+        WHERE sp.connection_id=?
+          AND c.provider_type IN ('vipstore_v1','starkmods_v1')
+          AND (scl.max_supplier_cost IS NULL OR scl.max_supplier_cost<=0)");
+    if (!$stmt) return ['success' => false, 'updated' => 0, 'message' => 'Unable to prepare max supplier cost backfill'];
+    $stmt->bind_param('di', $margin, $connectionId);
+    $ok = $stmt->execute();
+    $updated = $ok ? max(0, (int) $stmt->affected_rows) : 0;
+    $stmt->close();
+    return ['success' => $ok, 'updated' => $updated, 'message' => $ok ? 'Max supplier costs updated' : 'Unable to update max supplier costs'];
 }
 
 function supplierBridgeUnlinkProduct(int $supplierProductId): bool
@@ -8900,9 +9775,9 @@ function supplierBridgeGetUnifiedVariants(int $productId, string $role, int $use
     $role = $role === 'reseller' ? 'reseller' : 'user';
     $accountMap = $userId > 0 ? getResellerVariantPriceMap($userId) : [];
     $stmt = $conn->prepare("SELECT sp.id AS supplier_product_id, sp.remote_stock, sp.cost_base,
-                                  scl.local_variant_id, scl.source_priority,
+                                  scl.local_variant_id, scl.source_priority, scl.max_supplier_cost,
                                   pv.duration, pv.price_user, pv.price_reseller,
-                                  sc.id AS connection_id, sc.priority, sc.protect_below_cost,
+                                  sc.id AS connection_id, sc.priority, sc.protect_below_cost, sc.provider_type, sc.purchase_mode,
                                   CASE WHEN sp.inventory_last_error_at IS NOT NULL
                                             AND (sp.inventory_last_success_at IS NULL OR sp.inventory_last_error_at > sp.inventory_last_success_at)
                                             AND sp.inventory_last_error_at >= DATE_SUB(NOW(), INTERVAL 2 MINUTE)
@@ -8922,7 +9797,8 @@ function supplierBridgeGetUnifiedVariants(int $productId, string $role, int $use
     while ($row = $result ? $result->fetch_assoc() : null) {
         if (!$row) break;
         $variantId = (int) $row['local_variant_id'];
-        if ($variantId < 1) continue;
+        if ($variantId < 1 || !supplierBridgeConnectionAllowsPurchase($row, $userId)) continue;
+        if (supplierBridgeProviderRequiresProtectedPurchase((string) ($row['provider_type'] ?? '')) && (!is_numeric($row['max_supplier_cost'] ?? null) || (float) $row['max_supplier_cost'] <= 0)) continue;
         $price = $role === 'reseller' ? (float) $row['price_reseller'] : (float) $row['price_user'];
         if (array_key_exists($variantId, $accountMap)) $price = (float) $accountMap[$variantId];
         $price = round($price, 2);
@@ -8987,9 +9863,9 @@ function supplierBridgeGetUnifiedVariantsForProducts(
     $list = implode(',', array_values($ids));
     $sql = "SELECT scl.local_product_id,
                    sp.id AS supplier_product_id, sp.remote_stock, sp.cost_base,
-                   scl.local_variant_id, scl.source_priority,
+                   scl.local_variant_id, scl.source_priority, scl.max_supplier_cost,
                    pv.duration, pv.price_user, pv.price_reseller,
-                   sc.id AS connection_id, sc.priority, sc.protect_below_cost,
+                   sc.id AS connection_id, sc.priority, sc.protect_below_cost, sc.provider_type, sc.purchase_mode,
                    CASE WHEN sp.inventory_last_error_at IS NOT NULL
                               AND (sp.inventory_last_success_at IS NULL OR sp.inventory_last_error_at > sp.inventory_last_success_at)
                               AND sp.inventory_last_error_at >= DATE_SUB(NOW(), INTERVAL 2 MINUTE)
@@ -9009,7 +9885,8 @@ function supplierBridgeGetUnifiedVariantsForProducts(
     while ($row = $result->fetch_assoc()) {
         $productId = (int) ($row['local_product_id'] ?? 0);
         $variantId = (int) ($row['local_variant_id'] ?? 0);
-        if ($productId < 1 || $variantId < 1) continue;
+        if ($productId < 1 || $variantId < 1 || !supplierBridgeConnectionAllowsPurchase($row, $userId)) continue;
+        if (supplierBridgeProviderRequiresProtectedPurchase((string) ($row['provider_type'] ?? '')) && (!is_numeric($row['max_supplier_cost'] ?? null) || (float) $row['max_supplier_cost'] <= 0)) continue;
         $price = $role === 'reseller' ? (float) $row['price_reseller'] : (float) $row['price_user'];
         if (array_key_exists($variantId, $accountMap)) $price = (float) $accountMap[$variantId];
         $price = round($price, 2);
@@ -9064,8 +9941,8 @@ function supplierBridgeInventorySnapshot(array $variantIds, string $role, int $u
     $role = $role === 'reseller' ? 'reseller' : 'user';
     $accountMap = $userId > 0 ? getResellerVariantPriceMap($userId) : [];
     $list = implode(',', $ids);
-    $sql = "SELECT scl.local_product_id, scl.local_variant_id, sp.remote_stock, sp.cost_base,
-                   pv.price_user, pv.price_reseller, pv.duration, sc.protect_below_cost,
+    $sql = "SELECT scl.local_product_id, scl.local_variant_id, scl.max_supplier_cost, sp.remote_stock, sp.cost_base,
+                   pv.price_user, pv.price_reseller, pv.duration, sc.protect_below_cost, sc.provider_type, sc.purchase_mode,
                    CASE WHEN sp.inventory_last_error_at IS NOT NULL
                               AND (sp.inventory_last_success_at IS NULL OR sp.inventory_last_error_at > sp.inventory_last_success_at)
                               AND sp.inventory_last_error_at >= DATE_SUB(NOW(), INTERVAL 2 MINUTE)
@@ -9083,7 +9960,8 @@ function supplierBridgeInventorySnapshot(array $variantIds, string $role, int $u
     $localPriorityVariants = [];
     while ($row = $result->fetch_assoc()) {
         $variantId = (int) $row['local_variant_id'];
-        if ($variantId < 1) continue;
+        if ($variantId < 1 || !supplierBridgeConnectionAllowsPurchase($row, $userId)) continue;
+        if (supplierBridgeProviderRequiresProtectedPurchase((string) ($row['provider_type'] ?? '')) && (!is_numeric($row['max_supplier_cost'] ?? null) || (float) $row['max_supplier_cost'] <= 0)) continue;
         $productId = (int) $row['local_product_id'];
         if (!isset($productLocal[$productId])) {
             $variantSet = [];
@@ -9277,11 +10155,14 @@ function supplierBridgeRefreshStorefrontInventory(array $variantIds, int $maxAge
     return $result;
 }
 
-function supplierBridgeGetPurchaseCandidates(int $productId, int $variantId, int $quantity = 1, int $userId = 0): array
+function supplierBridgeGetPurchaseCandidates(int $productId, int $variantId, int $quantity = 1, int $userId = 0, ?float $unitPriceOverride = null): array
 {
     global $conn;
     if ($productId < 1 || $variantId < 1 || !storeBridgeEnsureSchema()) return [];
     $quantity = max(1, min(100, $quantity));
+    $unitPriceOverride = $unitPriceOverride !== null && is_finite($unitPriceOverride) && $unitPriceOverride > 0
+        ? round($unitPriceOverride, 2)
+        : null;
     $role = 'user';
     if ($userId > 0) {
         $roleStmt = $conn->prepare('SELECT role FROM users WHERE id=? LIMIT 1');
@@ -9294,8 +10175,8 @@ function supplierBridgeGetPurchaseCandidates(int $productId, int $variantId, int
             if ((string) ($roleRow['role'] ?? '') === 'reseller') $role = 'reseller';
         }
     }
-    $sql = "SELECT sp.*, scl.local_product_id, scl.local_variant_id, scl.source_priority,
-                   sc.endpoint_url, sc.api_key_ciphertext,
+    $sql = "SELECT sp.*, scl.local_product_id, scl.local_variant_id, scl.source_priority, scl.max_supplier_cost,
+                   sc.endpoint_url, sc.api_key_ciphertext, sc.provider_type, sc.purchase_mode,
                    CASE WHEN sp.inventory_checked_at IS NULL THEN NULL
                         ELSE GREATEST(0, TIMESTAMPDIFF(SECOND, sp.inventory_checked_at, NOW())) END AS inventory_age_seconds,
                    CASE WHEN sp.inventory_last_error_at IS NOT NULL
@@ -9321,8 +10202,12 @@ function supplierBridgeGetPurchaseCandidates(int $productId, int $variantId, int
     $rows = [];
     while ($row = $result ? $result->fetch_assoc() : null) {
         if (!$row) break;
-        $unitPrice = $role === 'reseller' ? (float) $row['local_price_reseller'] : (float) $row['local_price_user'];
-        if ($userId > 0) $unitPrice = (float) getEffectiveResellerPrice($userId, $variantId, $unitPrice);
+        if (!supplierBridgeConnectionAllowsPurchase($row, $userId)) continue;
+        if (supplierBridgeProviderRequiresProtectedPurchase((string) ($row['provider_type'] ?? '')) && (!is_numeric($row['max_supplier_cost'] ?? null) || (float) $row['max_supplier_cost'] <= 0)) continue;
+        $unitPrice = $unitPriceOverride !== null
+            ? $unitPriceOverride
+            : ($role === 'reseller' ? (float) $row['local_price_reseller'] : (float) $row['local_price_user']);
+        if ($unitPriceOverride === null && $userId > 0) $unitPrice = (float) getEffectiveResellerPrice($userId, $variantId, $unitPrice);
         if ((int) ($row['protect_below_cost'] ?? 1) === 1 && $unitPrice + 0.00001 < (float) $row['cost_base']) continue;
         $rows[] = $row;
     }
@@ -9330,17 +10215,17 @@ function supplierBridgeGetPurchaseCandidates(int $productId, int $variantId, int
     return $rows;
 }
 
-function supplierBridgeFindPurchaseLink(int $productId, int $variantId, int $supplierProductId = 0, int $userId = 0, int $quantity = 1): ?array
+function supplierBridgeFindPurchaseLink(int $productId, int $variantId, int $supplierProductId = 0, int $userId = 0, int $quantity = 1, ?float $unitPriceOverride = null): ?array
 {
     if ($supplierProductId > 0) {
-        foreach (supplierBridgeGetPurchaseCandidates($productId, $variantId, $quantity, $userId) as $row) {
+        foreach (supplierBridgeGetPurchaseCandidates($productId, $variantId, $quantity, $userId, $unitPriceOverride) as $row) {
             if ((int) ($row['id'] ?? 0) === $supplierProductId) return $row;
         }
         // An explicitly selected source may currently fail the below-cost guard.
         // Return null rather than silently routing the caller to another source.
         return null;
     }
-    $rows = supplierBridgeGetPurchaseCandidates($productId, $variantId, $quantity, $userId);
+    $rows = supplierBridgeGetPurchaseCandidates($productId, $variantId, $quantity, $userId, $unitPriceOverride);
     return $rows[0] ?? null;
 }
 
@@ -9442,22 +10327,36 @@ function supplierBridgeRefreshBlockingOrderIfStale(?array $row): ?array
     return $fresh ?: null;
 }
 
-function supplierBridgeFindBlockingPendingOrder(int $userId, int $localVariantId): ?array
+function supplierBridgeFindBlockingPendingOrder(int $userId, int $localVariantId, bool $refreshStale = true): ?array
 {
     global $conn;
     if ($userId < 1 || $localVariantId < 1 || !storeBridgeEnsureSchema()) return null;
-    $stmt = $conn->prepare("SELECT id,status,total_price_base,external_ref,created_at,updated_at
-        FROM supplier_orders
-        WHERE user_id=? AND local_variant_id=?
-          AND status IN ('submitting','unknown','pending','processing','manual_review')
-        ORDER BY id DESC LIMIT 1");
+    $stmt = $conn->prepare("SELECT so.id,so.status,so.total_price_base,so.external_ref,so.created_at,so.updated_at
+        FROM supplier_orders so
+        WHERE so.local_variant_id=?
+          AND so.status IN ('submitting','unknown','pending','processing','manual_review')
+          AND (
+              so.user_id=?
+              OR (
+                  so.source_kind='store_api'
+                  AND EXISTS (
+                      SELECT 1 FROM store_api_orders sao
+                      WHERE sao.id=so.source_order_id
+                        AND sao.billing_mode='reseller_wallet'
+                        AND sao.billing_user_id=?
+                        AND sao.refunded_at IS NULL
+                  )
+              )
+          )
+        ORDER BY so.id DESC LIMIT 1");
     if (!$stmt) return null;
-    $stmt->bind_param('ii', $userId, $localVariantId);
+    $stmt->bind_param('iii', $localVariantId, $userId, $userId);
     $stmt->execute();
     $result = $stmt->get_result();
     $row = $result ? $result->fetch_assoc() : null;
     $stmt->close();
-    return supplierBridgeRefreshBlockingOrderIfStale($row ?: null);
+    if (!$row || !$refreshStale) return $row ?: null;
+    return supplierBridgeRefreshBlockingOrderIfStale($row);
 }
 
 function supplierBridgeGenerateExternalRef(int $connectionId): string
@@ -9499,15 +10398,33 @@ function supplierBridgeStoredOrderKeyCount(int $orderId): int
 }
 
 
+function supplierBridgeRedactStoredOrderResponse(array $data, string $providerType): array
+{
+    if (!supplierBridgeProviderRequiresProtectedPurchase($providerType)) return $data;
+    $sensitiveFields = ['codes','keys','key','key_code','apikey','api_key','token','authorization','password','phpsessid'];
+    $walk = static function (array $node) use (&$walk, $sensitiveFields): array {
+        foreach ($node as $field => $value) {
+            $normalized = strtolower(preg_replace('/[^a-z0-9_]/i', '', (string) $field));
+            if (in_array($normalized, $sensitiveFields, true)) {
+                unset($node[$field]);
+                continue;
+            }
+            if (is_array($value)) $node[$field] = $walk($value);
+        }
+        return $node;
+    };
+    return $walk($data);
+}
+
 function supplierBridgeExtractKeys(array $data): array
 {
-    $candidates = [$data['keys'] ?? null, $data['data']['keys'] ?? null, $data['key'] ?? null, $data['data']['key'] ?? null];
+    $candidates = [$data['keys'] ?? null, $data['data']['keys'] ?? null, $data['codes'] ?? null, $data['data']['codes'] ?? null, $data['key'] ?? null, $data['data']['key'] ?? null];
     $keys = [];
     foreach ($candidates as $candidate) {
         if (is_string($candidate)) $candidate = preg_split('/\r\n|\r|\n/', $candidate) ?: [];
         if (!is_array($candidate)) continue;
         foreach ($candidate as $value) {
-            if (is_array($value)) $value = $value['key'] ?? $value['key_code'] ?? null;
+            if (is_array($value)) $value = $value['key'] ?? $value['key_code'] ?? $value['code'] ?? null;
             if (!is_scalar($value)) continue;
             $key = trim((string) $value);
             if ($key !== '' && strlen($key) <= 5000 && !in_array($key, $keys, true)) $keys[] = $key;
@@ -9517,13 +10434,51 @@ function supplierBridgeExtractKeys(array $data): array
     return $keys;
 }
 
+function supplierBridgeCommerceSyncOrder(int $orderId): void
+{
+    global $conn;
+    if ($orderId < 1) return;
+    $stmt = $conn->prepare('SELECT source_kind,source_order_id FROM supplier_orders WHERE id=? LIMIT 1');
+    if (!$stmt) {
+        commerceCenterSyncSafe('supplier_purchase', $orderId);
+        return;
+    }
+    $stmt->bind_param('i', $orderId);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    $row = $result ? $result->fetch_assoc() : null;
+    $stmt->close();
+    if (strtolower(trim((string) ($row['source_kind'] ?? 'storefront'))) === 'store_api'
+        && (int) ($row['source_order_id'] ?? 0) > 0) {
+        commerceCenterSyncSafe('store_api_sale', (int) $row['source_order_id']);
+        return;
+    }
+    commerceCenterSyncSafe('supplier_purchase', $orderId);
+}
+
 function supplierBridgeRefundOrder(int $orderId, string $reason): bool
 {
     global $conn;
-    if ($orderId < 1 || !storeBridgeEnsureSchema() || !ensureWalletLedgerSchema()) return false;
+    if ($orderId < 1 || !storeBridgeEnsureSchema()) return false;
+
+    // Store API procurement children never own billing. For ordinary storefront
+    // supplier orders, prepare the wallet audit schema before taking financial
+    // locks so a first-run DDL cannot implicitly commit an active transaction.
+    $pre = $conn->prepare('SELECT source_kind,source_order_id FROM supplier_orders WHERE id=? LIMIT 1');
+    if (!$pre) return false;
+    $pre->bind_param('i', $orderId);
+    if (!$pre->execute()) { $pre->close(); return false; }
+    $preResult = $pre->get_result();
+    $preOrder = $preResult ? $preResult->fetch_assoc() : null;
+    $pre->close();
+    if (!$preOrder) return false;
+    $externalBilling = strtolower(trim((string) ($preOrder['source_kind'] ?? 'storefront'))) === 'store_api'
+        && (int) ($preOrder['source_order_id'] ?? 0) > 0;
+    if (!$externalBilling && !ensureWalletLedgerSchema()) return false;
+
     $conn->begin_transaction();
     try {
-        $stmt = $conn->prepare('SELECT user_id,total_price_base,status,transaction_id,external_ref FROM supplier_orders WHERE id=? LIMIT 1 FOR UPDATE');
+        $stmt = $conn->prepare('SELECT user_id,total_price_base,status,transaction_id,external_ref,source_kind,source_order_id FROM supplier_orders WHERE id=? LIMIT 1 FOR UPDATE');
         if (!$stmt) throw new RuntimeException('Unable to lock supplier order');
         $stmt->bind_param('i', $orderId);
         $stmt->execute();
@@ -9533,6 +10488,35 @@ function supplierBridgeRefundOrder(int $orderId, string $reason): bool
         if (!$order) throw new RuntimeException('Supplier order not found');
         if ((string) $order['status'] === 'refunded') { $conn->rollback(); return true; }
         if (in_array((string) $order['status'], ['success','completed'], true)) { $conn->rollback(); return false; }
+        $keyCheck = $conn->prepare('SELECT COUNT(*) AS total FROM supplier_order_keys WHERE order_id=?');
+        if (!$keyCheck) throw new RuntimeException('Unable to verify supplier delivery before refund');
+        $keyCheck->bind_param('i', $orderId);
+        $keyCheck->execute();
+        $keyResult = $keyCheck->get_result();
+        $keyRow = $keyResult ? $keyResult->fetch_assoc() : null;
+        $keyCheck->close();
+        if ((int) ($keyRow['total'] ?? 0) > 0) {
+            $conn->rollback();
+            return false;
+        }
+
+        $sourceKind = strtolower(trim((string) ($order['source_kind'] ?? 'storefront')));
+        $sourceOrderId = (int) ($order['source_order_id'] ?? 0);
+        $reason = substr(trim($reason), 0, 2000);
+        if ($sourceKind === 'store_api' && $sourceOrderId > 0) {
+            // Billing belongs to the Store API parent. Mark only the procurement
+            // child refundable here; the parent refund is performed exactly once
+            // by storeBridgeRefundProviderOrder().
+            $update = $conn->prepare("UPDATE supplier_orders SET status='refunded',error_message=?,updated_at=NOW() WHERE id=?");
+            if (!$update) throw new RuntimeException('Unable to update external supplier order');
+            $update->bind_param('si', $reason, $orderId);
+            if (!$update->execute()) { $update->close(); throw new RuntimeException('Unable to update external supplier order'); }
+            $update->close();
+            if (!$conn->commit()) throw new RuntimeException('Unable to commit external supplier release');
+            supplierBridgeCommerceSyncOrder($orderId);
+            return true;
+        }
+
         $userId = (int) $order['user_id'];
         $amount = round((float) $order['total_price_base'], 2);
         $walletBefore = walletLedgerReadBalance($userId, true);
@@ -9542,7 +10526,6 @@ function supplierBridgeRefundOrder(int $orderId, string $reason): bool
         $credit->bind_param('di', $amount, $userId);
         if (!$credit->execute() || $credit->affected_rows !== 1) { $credit->close(); throw new RuntimeException('Unable to refund user'); }
         $credit->close();
-        $reason = substr(trim($reason), 0, 2000);
         $update = $conn->prepare("UPDATE supplier_orders SET status='refunded',error_message=? WHERE id=?");
         if (!$update) throw new RuntimeException('Unable to update supplier order');
         $update->bind_param('si', $reason, $orderId);
@@ -9567,13 +10550,132 @@ function supplierBridgeRefundOrder(int $orderId, string $reason): bool
         if (!$conn->commit()) throw new RuntimeException('Unable to commit supplier refund');
         if ((int) ($_SESSION['user_id'] ?? 0) === $userId) $_SESSION['balance'] = getUserBalance($userId);
         logHistory($userId, 'supplier_order_refund', 'Store Bridge order #' . $orderId . ' refunded: ' . $reason);
-        commerceCenterSyncSafe('supplier_purchase', $orderId);
+        supplierBridgeCommerceSyncOrder($orderId);
         return true;
     } catch (Throwable $e) {
         try { $conn->rollback(); } catch (Throwable $ignored) {}
         error_log('Supplier order refund failed: ' . $e->getMessage());
         return false;
     }
+}
+
+function supplierBridgeAdminConfirmOrderSuccess(int $orderId, string $rawKeys, int $adminId): array
+{
+    global $conn;
+    if ($orderId < 1 || $adminId < 1 || !storeBridgeEnsureSchema()) return ['success' => false, 'message' => 'Invalid manual supplier resolution request'];
+    $keys = supplierBridgeExtractKeys(['keys' => $rawKeys]);
+    if ($keys === []) return ['success' => false, 'message' => 'Enter the supplier key(s), one per line'];
+
+    $conn->begin_transaction();
+    try {
+        $stmt = $conn->prepare("SELECT so.id,so.status,so.quantity,so.transaction_id,so.supplier_product_id,so.connection_id,
+                                       so.source_kind,so.source_order_id,sc.provider_type
+                                FROM supplier_orders so
+                                JOIN supplier_connections sc ON sc.id=so.connection_id
+                                WHERE so.id=? LIMIT 1 FOR UPDATE");
+        if (!$stmt) throw new RuntimeException('Unable to lock supplier order');
+        $stmt->bind_param('i', $orderId);
+        $stmt->execute();
+        $result = $stmt->get_result();
+        $order = $result ? $result->fetch_assoc() : null;
+        $stmt->close();
+        if (!$order) throw new RuntimeException('Supplier order not found');
+        if (!supplierBridgeProviderRequiresProtectedPurchase((string) $order['provider_type'])) throw new RuntimeException('Manual key resolution is reserved for suppliers without verified reconciliation');
+        if ((string) $order['status'] === 'refunded') throw new RuntimeException('A refunded supplier order cannot be marked successful');
+        if ((string) $order['status'] === 'success') {
+            $conn->rollback();
+            if ((string)($order['source_kind'] ?? '') === 'store_api' && (int)($order['source_order_id'] ?? 0) > 0) {
+                $parentId = (int)$order['source_order_id'];
+                $applied = storeBridgeApplySupplierOrderState($parentId, $orderId);
+                if (empty($applied['success']) || !empty($applied['pending'])) {
+                    return ['success'=>false,'message'=>'Supplier order is already successful, but Store API parent order #'.$parentId.' still requires reconciliation.'];
+                }
+                return ['success'=>true,'message'=>'Supplier order was already successful and Store API order #'.$parentId.' is now deliverable'];
+            }
+            return ['success' => true, 'message' => 'Supplier order is already successful'];
+        }
+        $required = max(1, (int) $order['quantity']);
+        supplierBridgeStoreOrderKeys($orderId, $keys);
+        $stored = supplierBridgeStoredOrderKeyCount($orderId);
+        if ($stored !== $required) throw new RuntimeException('Stored key count must exactly match order quantity (' . $stored . '/' . $required . ')');
+
+        $note = 'Manually confirmed after supplier review by admin #' . $adminId;
+        $update = $conn->prepare("UPDATE supplier_orders SET status='success',error_message=?,completed_at=NOW(),updated_at=NOW() WHERE id=?");
+        if (!$update) throw new RuntimeException('Unable to prepare manual supplier completion');
+        $update->bind_param('si', $note, $orderId);
+        if (!$update->execute()) { $update->close(); throw new RuntimeException('Unable to mark supplier order successful'); }
+        $update->close();
+        $transactionId = (int) ($order['transaction_id'] ?? 0);
+        if ($transactionId > 0) {
+            $tx = $conn->prepare("UPDATE transactions SET status='completed' WHERE id=?");
+            if (!$tx) throw new RuntimeException('Unable to prepare supplier transaction completion');
+            $tx->bind_param('i', $transactionId);
+            if (!$tx->execute()) { $tx->close(); throw new RuntimeException('Unable to complete supplier transaction'); }
+            $tx->close();
+        }
+        $supplierProductId = (int) ($order['supplier_product_id'] ?? 0);
+        if ($supplierProductId > 0 && in_array((string) $order['status'], ['submitting','unknown','manual_review'], true)) {
+            $stockUpdate = $conn->prepare('UPDATE supplier_products SET remote_stock=GREATEST(remote_stock-?,0),inventory_checked_at=NOW() WHERE id=?');
+            if ($stockUpdate) {
+                $stockUpdate->bind_param('ii', $required, $supplierProductId);
+                $stockUpdate->execute();
+                $stockUpdate->close();
+            }
+        }
+        if (!$conn->commit()) throw new RuntimeException('Unable to commit manual supplier completion');
+        logHistory($adminId, 'supplier_order_manual_success', 'Manually confirmed protected supplier order #' . $orderId . '; keys=' . $stored);
+        supplierBridgeCommerceSyncOrder($orderId);
+        if ((string)($order['source_kind'] ?? '') === 'store_api' && (int)($order['source_order_id'] ?? 0) > 0) {
+            $parentId = (int)$order['source_order_id'];
+            $applied = storeBridgeApplySupplierOrderState($parentId, $orderId);
+            if (empty($applied['success']) || !empty($applied['pending'])) {
+                return [
+                    'success'=>false,
+                    'message'=>'Supplier keys were confirmed, but Store API parent order #'.$parentId.' still requires reconciliation before delivery.',
+                ];
+            }
+            return ['success'=>true,'message'=>'Supplier order was confirmed and Store API order #'.$parentId.' is now deliverable'];
+        }
+        return ['success' => true, 'message' => 'Supplier order was manually confirmed and the stored key(s) are now deliverable'];
+    } catch (Throwable $e) {
+        try { $conn->rollback(); } catch (Throwable $ignored) {}
+        return ['success' => false, 'message' => $e->getMessage()];
+    }
+}
+
+function supplierBridgeAdminRefundOrder(int $orderId, int $adminId, bool $confirmedNoSupplierOrder): array
+{
+    global $conn;
+    if ($orderId < 1 || $adminId < 1 || !$confirmedNoSupplierOrder || !storeBridgeEnsureSchema()) {
+        return ['success' => false, 'message' => 'Manual refund requires explicit confirmation that the supplier did not create the order'];
+    }
+    $stmt = $conn->prepare("SELECT so.status,so.source_kind,so.source_order_id,sc.provider_type
+                            FROM supplier_orders so
+                            JOIN supplier_connections sc ON sc.id=so.connection_id
+                            WHERE so.id=? LIMIT 1");
+    if (!$stmt) return ['success' => false, 'message' => 'Unable to verify supplier order'];
+    $stmt->bind_param('i', $orderId);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    $order = $result ? $result->fetch_assoc() : null;
+    $stmt->close();
+    if (!$order || !supplierBridgeProviderRequiresProtectedPurchase((string) ($order['provider_type'] ?? ''))) return ['success' => false, 'message' => 'This manual refund action is only for protected supplier review orders'];
+    if (supplierBridgeStoredOrderKeyCount($orderId) > 0) return ['success' => false, 'message' => 'Refund blocked because delivery key data is already stored'];
+    $reason = 'Manual supplier review confirmed no supplier order; approved by admin #' . $adminId;
+    if (!supplierBridgeRefundOrder($orderId, $reason)) return ['success' => false, 'message' => 'Unable to refund this supplier order'];
+    logHistory($adminId, 'supplier_order_manual_refund', 'Manually refunded protected supplier order #' . $orderId . ' after upstream verification');
+    if ((string)($order['source_kind'] ?? '') === 'store_api' && (int)($order['source_order_id'] ?? 0) > 0) {
+        $parentId = (int)$order['source_order_id'];
+        $applied = storeBridgeApplySupplierOrderState($parentId, $orderId);
+        if (empty($applied['refunded'])) {
+            return [
+                'success'=>false,
+                'message'=>'Supplier child was marked refunded, but Store API order #'.$parentId.' refund is still pending. Do not retry or credit manually yet.',
+            ];
+        }
+        return ['success'=>true,'message'=>'Supplier order was verified as not created and Store API order #'.$parentId.' was refunded exactly once'];
+    }
+    return ['success' => true, 'message' => 'Supplier order was manually verified as not created and the customer balance was refunded'];
 }
 
 function supplierBridgeInventoryFallbackLimit(array $refresh): int
@@ -9601,25 +10703,41 @@ function supplierBridgeCanUseBoundedInventoryFallback(array $link, int $quantity
     ];
 }
 
-function supplierBridgePurchase(int $supplierProductId, int $userId, int $quantity, int $localProductId, int $localVariantId, bool $allowBoundedInventoryFallback = false, bool $retryInventoryTransient = true): array
+function supplierBridgePurchase(int $supplierProductId, int $userId, int $quantity, int $localProductId, int $localVariantId, bool $allowBoundedInventoryFallback = false, bool $retryInventoryTransient = true, string $sourceKind = 'storefront', int $sourceOrderId = 0, ?float $storeApiUnitPrice = null): array
 {
     global $conn;
-    if ($supplierProductId < 1 || $userId < 1 || $quantity < 1 || $quantity > 100 || $localProductId < 1 || $localVariantId < 1 || !storeBridgeEnsureSchema()) return ['success' => false, 'message' => 'Invalid purchase request'];
-    if (!ensureWalletLedgerSchema()) return ['success' => false, 'message' => 'Financial audit storage is unavailable. No balance was charged.'];
+    $sourceKind = strtolower(trim($sourceKind));
+    if (!in_array($sourceKind, ['storefront', 'store_api'], true)) $sourceKind = 'storefront';
+    $externalBilling = $sourceKind === 'store_api';
+    if (!$externalBilling) {
+        $sourceOrderId = 0;
+        $storeApiUnitPrice = null;
+    } else {
+        $storeApiUnitPrice = $storeApiUnitPrice !== null && is_finite($storeApiUnitPrice) && $storeApiUnitPrice > 0
+            ? round($storeApiUnitPrice, 2)
+            : null;
+    }
+    if ($supplierProductId < 1 || (!$externalBilling && $userId < 1) || $quantity < 1 || $quantity > 100 || $localProductId < 1 || $localVariantId < 1
+        || ($externalBilling && ($sourceOrderId < 1 || $storeApiUnitPrice === null)) || !storeBridgeEnsureSchema()) {
+        return ['success' => false, 'message' => 'Invalid purchase request'];
+    }
+    if (!$externalBilling && !ensureWalletLedgerSchema()) return ['success' => false, 'message' => 'Financial audit storage is unavailable. No balance was charged.'];
 
-    $blockingOrder = supplierBridgeFindBlockingPendingOrder($userId, $localVariantId);
-    if ($blockingOrder) {
-        return [
-            'success' => false,
-            'pending' => true,
-            'code' => 'existing_pending_supplier_order',
-            'order_id' => (int) ($blockingOrder['id'] ?? 0),
-            'total' => (float) ($blockingOrder['total_price_base'] ?? 0),
-            'message' => 'An earlier API order for this variant is still unresolved. Do not submit another order.',
-        ];
+    if (!$externalBilling) {
+        $blockingOrder = supplierBridgeFindBlockingPendingOrder($userId, $localVariantId);
+        if ($blockingOrder) {
+            return [
+                'success' => false,
+                'pending' => true,
+                'code' => 'existing_pending_supplier_order',
+                'order_id' => (int) ($blockingOrder['id'] ?? 0),
+                'total' => (float) ($blockingOrder['total_price_base'] ?? 0),
+                'message' => 'An earlier API order for this variant is still unresolved. Do not submit another order.',
+            ];
+        }
     }
 
-    $link = supplierBridgeFindPurchaseLink($localProductId, $localVariantId, $supplierProductId, $userId, $quantity);
+    $link = supplierBridgeFindPurchaseLink($localProductId, $localVariantId, $supplierProductId, $userId, $quantity, $storeApiUnitPrice);
     if (!$link || (int) $link['id'] !== $supplierProductId) return ['success' => false, 'safe_to_failover' => true, 'code' => 'mapping_unavailable', 'message' => 'Supplier mapping is unavailable'];
 
     // Confirm this exact product before every API purchase. The old path
@@ -9627,7 +10745,7 @@ function supplierBridgePurchase(int $supplierProductId, int $userId, int $quanti
     // product was absent or failed to save locally.
     $inventoryDegraded = false;
     $inventoryRefresh = supplierBridgeConfirmProductInventory($supplierProductId, $quantity, true, $retryInventoryTransient);
-    $refreshedLink = supplierBridgeFindPurchaseLink($localProductId, $localVariantId, $supplierProductId, $userId, $quantity);
+    $refreshedLink = supplierBridgeFindPurchaseLink($localProductId, $localVariantId, $supplierProductId, $userId, $quantity, $storeApiUnitPrice);
     if ($refreshedLink) $link = $refreshedLink;
     if (empty($inventoryRefresh['success'])) {
         // Unified checkout is fail-closed for stale supplier inventory by default.
@@ -9664,6 +10782,15 @@ function supplierBridgePurchase(int $supplierProductId, int $userId, int $quanti
             . '; class=' . (string) ($inventoryRefresh['failure_class'] ?? 'unknown'));
     }
     if (!$link) return ['success' => false, 'safe_to_failover' => true, 'code' => 'mapping_unavailable', 'message' => 'Supplier mapping is unavailable'];
+    $providerType = strtolower(trim((string) ($link['provider_type'] ?? '')));
+    $maxSupplierCost = isset($link['max_supplier_cost']) && is_numeric($link['max_supplier_cost'])
+        ? round((float) $link['max_supplier_cost'], 2) : null;
+    if (supplierBridgeProviderRequiresProtectedPurchase($providerType) && ($maxSupplierCost === null || $maxSupplierCost <= 0)) {
+        return ['success' => false, 'safe_to_failover' => true, 'code' => 'supplier_cost_guard_missing', 'message' => 'Max supplier cost is not configured for this supplier'];
+    }
+    if ($maxSupplierCost !== null && $maxSupplierCost > 0 && (float) $link['cost_base'] > $maxSupplierCost + 0.00001) {
+        return ['success' => false, 'safe_to_failover' => true, 'code' => 'supplier_cost_guard_exceeded', 'message' => 'Current supplier cost exceeds the configured maximum'];
+    }
     $stock = max(0, (int) $link['remote_stock']);
     if ($stock < 1) return ['success' => false, 'safe_to_failover' => true, 'code' => 'supplier_out_of_stock', 'message' => 'Supplier stock is sold out'];
     if ($quantity > $stock) return ['success' => false, 'safe_to_failover' => true, 'code' => 'supplier_stock_insufficient', 'available_stock' => $stock, 'message' => 'Supplier stock is lower than requested quantity'];
@@ -9680,11 +10807,19 @@ function supplierBridgePurchase(int $supplierProductId, int $userId, int $quanti
 
     // Re-read after acquiring the cross-request lock. Another checkout on this
     // website may have reduced the cached stock while this request was waiting.
-    $link = supplierBridgeFindPurchaseLink($localProductId, $localVariantId, $supplierProductId, $userId, $quantity);
+    $link = supplierBridgeFindPurchaseLink($localProductId, $localVariantId, $supplierProductId, $userId, $quantity, $storeApiUnitPrice);
     if (!$link || (int) $link['id'] !== $supplierProductId) {
         $release = $conn->prepare('SELECT RELEASE_LOCK(?)');
         if ($release) { $release->bind_param('s', $lockName); $release->execute(); $release->close(); }
         return ['success' => false, 'safe_to_failover' => true, 'code' => 'mapping_unavailable', 'message' => 'Supplier mapping changed during checkout'];
+    }
+    $lockedMaxSupplierCost = isset($link['max_supplier_cost']) && is_numeric($link['max_supplier_cost'])
+        ? round((float) $link['max_supplier_cost'], 2) : null;
+    if ((supplierBridgeProviderRequiresProtectedPurchase((string) ($link['provider_type'] ?? '')) && ($lockedMaxSupplierCost === null || $lockedMaxSupplierCost <= 0))
+        || ($lockedMaxSupplierCost !== null && $lockedMaxSupplierCost > 0 && (float) $link['cost_base'] > $lockedMaxSupplierCost + 0.00001)) {
+        $release = $conn->prepare('SELECT RELEASE_LOCK(?)');
+        if ($release) { $release->bind_param('s', $lockName); $release->execute(); $release->close(); }
+        return ['success' => false, 'safe_to_failover' => true, 'code' => 'supplier_cost_guard_exceeded', 'message' => 'Supplier cost guard blocked this source'];
     }
     $lockedStock = max(0, (int) $link['remote_stock']);
     if ($quantity > $lockedStock) {
@@ -9702,16 +10837,33 @@ function supplierBridgePurchase(int $supplierProductId, int $userId, int $quanti
     $externalRef = supplierBridgeGenerateExternalRef((int) $link['connection_id']);
     try {
         $conn->begin_transaction();
-        $userStmt = $conn->prepare("SELECT id,username,email,role,balance,status FROM users WHERE id=? LIMIT 1 FOR UPDATE");
-        if (!$userStmt) throw new RuntimeException('Unable to lock user');
-        $userStmt->bind_param('i', $userId);
-        $userStmt->execute();
-        $userResult = $userStmt->get_result();
-        $user = $userResult ? $userResult->fetch_assoc() : null;
-        $userStmt->close();
-        if (!$user || (string) $user['status'] !== 'active') {
-            $conn->rollback();
-            return ['success' => false, 'code' => 'account_unavailable', 'message' => 'User account is inactive'];
+        $user = null;
+        if (!$externalBilling) {
+            $userStmt = $conn->prepare("SELECT id,username,email,role,balance,status FROM users WHERE id=? LIMIT 1 FOR UPDATE");
+            if (!$userStmt) throw new RuntimeException('Unable to lock user');
+            $userStmt->bind_param('i', $userId);
+            $userStmt->execute();
+            $userResult = $userStmt->get_result();
+            $user = $userResult ? $userResult->fetch_assoc() : null;
+            $userStmt->close();
+            if (!$user || (string) $user['status'] !== 'active') {
+                $conn->rollback();
+                return ['success' => false, 'code' => 'account_unavailable', 'message' => 'User account is inactive'];
+            }
+
+            // The user row lock serializes concurrent storefront purchases for this account.
+            $blockingOrder = supplierBridgeFindBlockingPendingOrder($userId, $localVariantId, false);
+            if ($blockingOrder) {
+                $conn->rollback();
+                return [
+                    'success' => false,
+                    'pending' => true,
+                    'code' => 'existing_pending_supplier_order',
+                    'order_id' => (int) ($blockingOrder['id'] ?? 0),
+                    'total' => (float) ($blockingOrder['total_price_base'] ?? 0),
+                    'message' => 'An earlier API order for this variant is still unresolved. Do not submit another order.',
+                ];
+            }
         }
         $variantStmt = $conn->prepare("SELECT duration,price_user,price_reseller,cost_price,status FROM product_variants WHERE id=? AND product_id=? LIMIT 1 FOR UPDATE");
         if (!$variantStmt) throw new RuntimeException('Unable to lock local variant');
@@ -9724,57 +10876,107 @@ function supplierBridgePurchase(int $supplierProductId, int $userId, int $quanti
             $conn->rollback();
             return ['success' => false, 'code' => 'variant_unavailable', 'message' => 'Local variant is inactive'];
         }
-        $unitPrice = (string) $user['role'] === 'reseller' ? (float) $variant['price_reseller'] : (float) $variant['price_user'];
-        $unitPrice = getEffectiveResellerPrice($userId, $localVariantId, $unitPrice);
-        $unitPrice = round((float) $unitPrice, 2);
+
+        $providerCustomerName = $externalBilling ? '' : (string) ($user['username'] ?? '');
+        $providerCustomerEmail = $externalBilling ? '' : (string) ($user['email'] ?? '');
+        $providerOriginSiteId = commerceCenterSiteId();
+        $providerOriginUserId = $externalBilling ? '' : (string) $userId;
+        $providerCustomerRef = $providerOriginUserId !== '' ? commerceCenterCustomerRef($providerOriginSiteId, $providerOriginUserId) : '';
+
+        if ($externalBilling) {
+            $parentStmt = $conn->prepare("SELECT id,status,fulfillment_source,billing_mode,billing_user_id,source_product_id,source_variant_id,quantity,unit_price,total_price,
+                                                customer_name,customer_email,origin_site_id,origin_user_id,customer_ref,refunded_at
+                                         FROM store_api_orders WHERE id=? LIMIT 1 FOR UPDATE");
+            if (!$parentStmt) throw new RuntimeException('Unable to lock parent Store API order');
+            $parentStmt->bind_param('i', $sourceOrderId);
+            $parentStmt->execute();
+            $parentResult = $parentStmt->get_result();
+            $parent = $parentResult ? $parentResult->fetch_assoc() : null;
+            $parentStmt->close();
+            $parentBillingMode = $parent ? storeBridgeNormalizeBillingMode($parent['billing_mode'] ?? 'api_balance') : 'api_balance';
+            $parentBillingOwnerValid = $parentBillingMode === 'reseller_wallet'
+                ? ($userId > 0 && (int) ($parent['billing_user_id'] ?? 0) === $userId)
+                : ($userId === 0 && (int) ($parent['billing_user_id'] ?? 0) === 0);
+            if (!$parent
+                || strtolower(trim((string) ($parent['status'] ?? ''))) !== 'processing'
+                || strtolower(trim((string) ($parent['fulfillment_source'] ?? ''))) !== 'supplier'
+                || !$parentBillingOwnerValid
+                || (int) ($parent['source_product_id'] ?? 0) !== $localProductId
+                || (int) ($parent['source_variant_id'] ?? 0) !== $localVariantId
+                || (int) ($parent['quantity'] ?? 0) !== $quantity
+                || !empty($parent['refunded_at'])) {
+                $conn->rollback();
+                return ['success' => false, 'code' => 'parent_order_unavailable', 'message' => 'Store API parent order is not eligible for supplier procurement'];
+            }
+            $unitPrice = round((float) ($parent['unit_price'] ?? 0), 2);
+            $totalPrice = round((float) ($parent['total_price'] ?? 0), 2);
+            if ($unitPrice <= 0 || abs($unitPrice - (float) $storeApiUnitPrice) > 0.01 || abs(($unitPrice * $quantity) - $totalPrice) > 0.01) {
+                $conn->rollback();
+                return ['success' => false, 'code' => 'parent_price_invalid', 'message' => 'Store API parent pricing is invalid'];
+            }
+            $providerCustomerName = trim((string) ($parent['customer_name'] ?? '')) ?: $providerCustomerName;
+            $providerCustomerEmail = trim((string) ($parent['customer_email'] ?? '')) ?: $providerCustomerEmail;
+            $providerOriginSiteId = trim((string) ($parent['origin_site_id'] ?? '')) ?: $providerOriginSiteId;
+            $providerOriginUserId = trim((string) ($parent['origin_user_id'] ?? '')) ?: $providerOriginUserId;
+            $providerCustomerRef = trim((string) ($parent['customer_ref'] ?? ''));
+            if ($providerCustomerRef === '') $providerCustomerRef = commerceCenterCustomerRef($providerOriginSiteId, $providerOriginUserId);
+        } else {
+            $unitPrice = (string) $user['role'] === 'reseller' ? (float) $variant['price_reseller'] : (float) $variant['price_user'];
+            $unitPrice = getEffectiveResellerPrice($userId, $localVariantId, $unitPrice);
+            $unitPrice = round((float) $unitPrice, 2);
+            $totalPrice = round($unitPrice * $quantity, 2);
+            if ((float) $user['balance'] + 0.00001 < $totalPrice) {
+                $conn->rollback();
+                return ['success' => false, 'code' => 'insufficient_balance', 'message' => 'Insufficient balance'];
+            }
+        }
         if ((int) ($link['protect_below_cost'] ?? 1) === 1 && $unitPrice + 0.00001 < (float) $link['cost_base']) {
             $conn->rollback();
             return ['success' => false, 'safe_to_failover' => true, 'code' => 'supplier_price_blocked', 'message' => 'This supplier source is above the allowed selling price'];
         }
-        $totalPrice = round($unitPrice * $quantity, 2);
-        if ((float) $user['balance'] + 0.00001 < $totalPrice) {
-            $conn->rollback();
-            return ['success' => false, 'code' => 'insufficient_balance', 'message' => 'Insufficient balance'];
-        }
         $cost = round((float) $link['cost_base'], 2);
         $totalCost = round($cost * $quantity, 2);
         $order = $conn->prepare("INSERT INTO supplier_orders
-            (external_ref,connection_id,supplier_product_id,user_id,local_product_id,local_variant_id,quantity,unit_cost_base,total_cost_base,unit_price_base,total_price_base,status)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,'submitting')");
+            (external_ref,source_kind,source_order_id,connection_id,supplier_product_id,user_id,local_product_id,local_variant_id,quantity,unit_cost_base,total_cost_base,unit_price_base,total_price_base,status)
+            VALUES (?,?,NULLIF(?,0),?,?,?,?,?,?,?,?,?,?,'submitting')");
         if (!$order) throw new RuntimeException('Unable to prepare supplier order');
         $connectionId = (int) $link['connection_id'];
-        $order->bind_param('siiiiiidddd', $externalRef, $connectionId, $supplierProductId, $userId, $localProductId, $localVariantId, $quantity, $cost, $totalCost, $unitPrice, $totalPrice);
+        $supplierUserId = $externalBilling ? 0 : $userId;
+        $order->bind_param('ssiiiiiiidddd', $externalRef, $sourceKind, $sourceOrderId, $connectionId, $supplierProductId, $supplierUserId, $localProductId, $localVariantId, $quantity, $cost, $totalCost, $unitPrice, $totalPrice);
         if (!$order->execute()) { $order->close(); throw new RuntimeException('Unable to create supplier order'); }
         $orderId = (int) $conn->insert_id;
         $order->close();
-        $debit = $conn->prepare('UPDATE users SET balance=balance-? WHERE id=? AND balance>=?');
-        if (!$debit) throw new RuntimeException('Unable to prepare balance debit');
-        $debit->bind_param('did', $totalPrice, $userId, $totalPrice);
-        if (!$debit->execute() || $debit->affected_rows !== 1) { $debit->close(); throw new RuntimeException('Balance changed during checkout'); }
-        $debit->close();
-        $description = 'Store Bridge order ' . $externalRef . ': ' . (string) $link['name'] . ' - ' . (string) $variant['duration'] . ' x' . $quantity;
-        $transactionId = (int) createTransaction($userId, 'supplier_purchase', $totalPrice, 'pending', $description, $orderId);
-        if ($transactionId < 1) throw new RuntimeException('Unable to create purchase transaction');
-        $updateOrder = $conn->prepare('UPDATE supplier_orders SET transaction_id=? WHERE id=?');
-        if (!$updateOrder) throw new RuntimeException('Unable to link purchase transaction');
-        $updateOrder->bind_param('ii', $transactionId, $orderId);
-        if (!$updateOrder->execute()) { $updateOrder->close(); throw new RuntimeException('Unable to link purchase transaction'); }
-        $updateOrder->close();
-        $walletBefore = round((float) $user['balance'], 2);
-        $walletAfter = round($walletBefore - $totalPrice, 2);
-        if (!walletLedgerRecordMovement(
-            $userId, -$totalPrice, $walletBefore, $walletAfter,
-            'supplier_purchase', 'transaction:' . $transactionId, $orderId, $transactionId, null,
-            'ซื้อสินค้าผ่าน Supplier x' . $quantity,
-            'Balance reserved for Store Bridge order #' . $orderId . '.',
-            $externalRef, true
-        )) {
-            throw new RuntimeException('Unable to write supplier purchase wallet audit');
+
+        if (!$externalBilling) {
+            $debit = $conn->prepare('UPDATE users SET balance=balance-? WHERE id=? AND balance>=?');
+            if (!$debit) throw new RuntimeException('Unable to prepare balance debit');
+            $debit->bind_param('did', $totalPrice, $userId, $totalPrice);
+            if (!$debit->execute() || $debit->affected_rows !== 1) { $debit->close(); throw new RuntimeException('Balance changed during checkout'); }
+            $debit->close();
+            $description = 'Store Bridge order ' . $externalRef . ': ' . (string) $link['name'] . ' - ' . (string) $variant['duration'] . ' x' . $quantity;
+            $transactionId = (int) createTransaction($userId, 'supplier_purchase', $totalPrice, 'pending', $description, $orderId);
+            if ($transactionId < 1) throw new RuntimeException('Unable to create purchase transaction');
+            $updateOrder = $conn->prepare('UPDATE supplier_orders SET transaction_id=? WHERE id=?');
+            if (!$updateOrder) throw new RuntimeException('Unable to link purchase transaction');
+            $updateOrder->bind_param('ii', $transactionId, $orderId);
+            if (!$updateOrder->execute()) { $updateOrder->close(); throw new RuntimeException('Unable to link purchase transaction'); }
+            $updateOrder->close();
+            $walletBefore = round((float) $user['balance'], 2);
+            $walletAfter = round($walletBefore - $totalPrice, 2);
+            if (!walletLedgerRecordMovement(
+                $userId, -$totalPrice, $walletBefore, $walletAfter,
+                'supplier_purchase', 'transaction:' . $transactionId, $orderId, $transactionId, null,
+                'ซื้อสินค้าผ่าน Supplier x' . $quantity,
+                'Balance reserved for Store Bridge order #' . $orderId . '.',
+                $externalRef, true
+            )) {
+                throw new RuntimeException('Unable to write supplier purchase wallet audit');
+            }
         }
         $reservationCommitAttempted = true;
         if (!$conn->commit()) throw new RuntimeException('Unable to commit supplier order reservation');
         $reservationCommitted = true;
-        $_SESSION['balance'] = getUserBalance($userId);
+        if (!$externalBilling) $_SESSION['balance'] = getUserBalance($userId);
 
         $connection = supplierBridgeGetConnection((int) $link['connection_id']);
         if (!$connection) throw new RuntimeException('Supplier connection disappeared');
@@ -9782,22 +10984,51 @@ function supplierBridgePurchase(int $supplierProductId, int $userId, int $quanti
         // provider may have committed the external_ref even if we never receive
         // a usable reply. Never fail over to another supplier in that state.
         $orderRequestStarted = true;
-        $api = supplierBridgeApiRequest($connection, 'order', 'POST', [
+        $orderPayload = [
             'external_ref' => $externalRef,
             'product_id' => (string) $link['remote_product_id'],
             'quantity' => $quantity,
-            'origin_site_id' => commerceCenterSiteId(),
-            'origin_user_id' => (string) $userId,
-            'customer_ref' => commerceCenterCustomerRef(commerceCenterSiteId(), (string) $userId),
-            'customer_name' => (string) $user['username'],
-            'customer_email' => (string) $user['email'],
-        ]);
-        $responseJson = is_array($api['data']) ? json_encode($api['data'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE) : null;
+            'origin_site_id' => $providerOriginSiteId,
+            'origin_user_id' => $providerOriginUserId,
+            'customer_ref' => $providerCustomerRef,
+            'customer_name' => $providerCustomerName,
+            'customer_email' => $providerCustomerEmail,
+        ];
+        if (supplierBridgeProviderRequiresProtectedPurchase((string) ($connection['provider_type'] ?? ''))) {
+            $orderPayload['_max_supplier_cost'] = $lockedMaxSupplierCost;
+        }
+        $api = supplierBridgeApiRequest($connection, 'order', 'POST', $orderPayload);
+        $providerType = strtolower(trim((string) ($connection['provider_type'] ?? '')));
+        $storedResponse = is_array($api['data'] ?? null)
+            ? supplierBridgeRedactStoredOrderResponse($api['data'], $providerType)
+            : null;
+        $responseJson = is_array($storedResponse) ? json_encode($storedResponse, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE) : null;
         if (!$api['ok'] || !is_array($api['data'])) {
             $httpCode = (int) ($api['http_code'] ?? 0);
             $apiErrorCode = strtolower(trim((string) ($api['error_code'] ?? '')));
             $definitiveNoOrder = supplierBridgeProviderProvesOrderNotCreated($connection, $api);
+            $requiresExplicitNoOrderProof = supplierBridgeProviderRequiresProtectedPurchase($providerType);
+            $errorKeys = is_array($api['data'] ?? null) ? supplierBridgeExtractKeys($api['data']) : [];
+            if ($errorKeys !== []) {
+                supplierBridgeStoreOrderKeys($orderId, $errorKeys);
+                $storedKeyCount = supplierBridgeStoredOrderKeyCount($orderId);
+                $reviewMessage = 'Supplier returned an error together with delivered key data (' . $storedKeyCount . '/' . $quantity . '). Automatic refund/failover was blocked.';
+                $stmt = $conn->prepare("UPDATE supplier_orders SET status='manual_review',response_json=?,error_message=?,updated_at=NOW() WHERE id=?");
+                if ($stmt) { $stmt->bind_param('ssi', $responseJson, $reviewMessage, $orderId); $stmt->execute(); $stmt->close(); }
+                supplierBridgeCommerceSyncOrder($orderId);
+                return [
+                    'success' => false,
+                    'pending' => true,
+                    'manual_review' => true,
+                    'code' => 'supplier_delivery_conflict',
+                    'order_id' => $orderId,
+                    'total' => $totalPrice,
+                    'message' => 'Supplier returned delivery data with an error. The order requires manual review and must not be retried.',
+                ];
+            }
             $ambiguous = !$definitiveNoOrder && (
+                $requiresExplicitNoOrderProof
+                ||
                 !empty($api['transport_error'])
                 || $httpCode === 0
                 || in_array($httpCode, [408, 425, 429], true)
@@ -9809,10 +11040,19 @@ function supplierBridgePurchase(int $supplierProductId, int $userId, int $quanti
             );
             if ($ambiguous) {
                 $message = substr((string) ($api['error'] ?? 'Supplier response is uncertain'), 0, 2000);
-                $stmt = $conn->prepare("UPDATE supplier_orders SET status='unknown',response_json=?,error_message=? WHERE id=?");
-                if ($stmt) { $stmt->bind_param('ssi', $responseJson, $message, $orderId); $stmt->execute(); $stmt->close(); }
-                commerceCenterSyncSafe('supplier_purchase', $orderId);
-                return ['success' => false, 'pending' => true, 'code' => 'supplier_response_uncertain', 'order_id' => $orderId, 'total' => $totalPrice, 'message' => 'Supplier response is uncertain. Your balance is reserved for manual review. Do not retry this variant.'];
+                $uncertainStatus = supplierBridgeProviderRequiresProtectedPurchase($providerType) ? 'manual_review' : 'unknown';
+                $stmt = $conn->prepare('UPDATE supplier_orders SET status=?,response_json=?,error_message=? WHERE id=?');
+                if ($stmt) { $stmt->bind_param('sssi', $uncertainStatus, $responseJson, $message, $orderId); $stmt->execute(); $stmt->close(); }
+                supplierBridgeCommerceSyncOrder($orderId);
+                return [
+                    'success' => false,
+                    'pending' => true,
+                    'manual_review' => supplierBridgeProviderRequiresProtectedPurchase($providerType),
+                    'code' => 'supplier_response_uncertain',
+                    'order_id' => $orderId,
+                    'total' => $totalPrice,
+                    'message' => 'Supplier response is uncertain. Your balance is reserved for manual review. Do not retry this variant.',
+                ];
             }
             $reason = (string) ($api['error'] ?? 'Supplier rejected the order');
             $providerCode = (string) ($api['error_code'] ?? 'supplier_rejected');
@@ -9832,23 +11072,6 @@ function supplierBridgePurchase(int $supplierProductId, int $userId, int $quanti
                     'message' => $refunded
                         ? 'Supplier confirmed that no order was created. Reserved balance was refunded.'
                         : 'Supplier confirmed that no order was created, but the local refund requires reconciliation.',
-                ];
-            }
-            $errorKeys = is_array($api['data'] ?? null) ? supplierBridgeExtractKeys($api['data']) : [];
-            if ($errorKeys !== []) {
-                supplierBridgeStoreOrderKeys($orderId, $errorKeys);
-                $storedKeyCount = supplierBridgeStoredOrderKeyCount($orderId);
-                $reviewMessage = 'Supplier returned an error together with delivered key data (' . $storedKeyCount . '/' . $quantity . '). Automatic refund/failover was blocked.';
-                $stmt = $conn->prepare("UPDATE supplier_orders SET status='manual_review',response_json=?,error_message=?,updated_at=NOW() WHERE id=?");
-                if ($stmt) { $stmt->bind_param('ssi', $responseJson, $reviewMessage, $orderId); $stmt->execute(); $stmt->close(); }
-                commerceCenterSyncSafe('supplier_purchase', $orderId);
-                return [
-                    'success' => false,
-                    'pending' => true,
-                    'code' => 'supplier_delivery_conflict',
-                    'order_id' => $orderId,
-                    'total' => $totalPrice,
-                    'message' => 'Supplier returned delivery data with an error. The order requires reconciliation and must not be retried.',
                 ];
             }
             supplierBridgeApplyOrderInventoryFailure($supplierProductId, $providerCode, $reason);
@@ -9880,7 +11103,7 @@ function supplierBridgePurchase(int $supplierProductId, int $userId, int $quanti
                 $reviewMessage = 'Supplier rejected the order but also returned key data (' . $storedKeyCount . '/' . $quantity . '). Automatic refund/failover was blocked.';
                 $stmt = $conn->prepare("UPDATE supplier_orders SET status='manual_review',response_json=?,error_message=? WHERE id=?");
                 if ($stmt) { $stmt->bind_param('ssi', $responseJson, $reviewMessage, $orderId); $stmt->execute(); $stmt->close(); }
-                commerceCenterSyncSafe('supplier_purchase', $orderId);
+                supplierBridgeCommerceSyncOrder($orderId);
                 return [
                     'success' => false,
                     'pending' => true,
@@ -9906,6 +11129,24 @@ function supplierBridgePurchase(int $supplierProductId, int $userId, int $quanti
             ];
         }
         $supplierOrderId = trim((string) ($payloadData['order_id'] ?? $payloadData['id'] ?? ''));
+        if (supplierBridgeProviderRequiresProtectedPurchase($providerType) && is_numeric($payloadData['price_used'] ?? null)) {
+            $actualUnitCost = round(max(0.0, (float) $payloadData['price_used']), 2);
+            $actualTotalCost = is_numeric($payloadData['total_deducted'] ?? null)
+                ? round(max(0.0, (float) $payloadData['total_deducted']), 2)
+                : round($actualUnitCost * $quantity, 2);
+            $costUpdate = $conn->prepare('UPDATE supplier_orders SET unit_cost_base=?,total_cost_base=? WHERE id=?');
+            if ($costUpdate) {
+                $costUpdate->bind_param('ddi', $actualUnitCost, $actualTotalCost, $orderId);
+                $costUpdate->execute();
+                $costUpdate->close();
+            }
+            $productCostUpdate = $conn->prepare('UPDATE supplier_products SET cost_base=? WHERE id=?');
+            if ($productCostUpdate) {
+                $productCostUpdate->bind_param('di', $actualUnitCost, $supplierProductId);
+                $productCostUpdate->execute();
+                $productCostUpdate->close();
+            }
+        }
         supplierBridgeStoreOrderKeys($orderId, $keys);
         $storedKeyCount = supplierBridgeStoredOrderKeyCount($orderId);
         $validKeyCount = $storedKeyCount === $quantity;
@@ -9917,15 +11158,16 @@ function supplierBridgePurchase(int $supplierProductId, int $userId, int $quanti
             $update->execute();
             $update->close();
         }
-        if ($finalStatus === 'success') updateTransactionStatus($transactionId, 'completed');
+        if ($finalStatus === 'success' && $transactionId > 0) updateTransactionStatus($transactionId, 'completed');
         $stockUpdate = $conn->prepare('UPDATE supplier_products SET remote_stock=GREATEST(remote_stock-?,0),inventory_checked_at=NOW() WHERE id=?');
         if ($stockUpdate) { $stockUpdate->bind_param('ii', $quantity, $supplierProductId); $stockUpdate->execute(); $stockUpdate->close(); }
-        logHistory($userId, 'supplier_order', 'Store Bridge order ' . $externalRef . ' status=' . $finalStatus . '; quantity=' . $quantity);
-        commerceCenterSyncSafe('supplier_purchase', $orderId);
+        if ($userId > 0) logHistory($userId, 'supplier_order', 'Store Bridge order ' . $externalRef . ' status=' . $finalStatus . '; quantity=' . $quantity);
+        supplierBridgeCommerceSyncOrder($orderId);
         return [
             'success' => $finalStatus === 'success',
             'processing' => $finalStatus === 'processing',
             'pending' => $finalStatus === 'manual_review',
+            'manual_review' => $finalStatus === 'manual_review',
             'order_id' => $orderId,
             'keys' => $finalStatus === 'success' ? $keys : [],
             'total' => $totalPrice,
@@ -10019,7 +11261,7 @@ function supplierBridgePurchase(int $supplierProductId, int $userId, int $quanti
         if ($orderId > 0) {
             $stmt = $conn->prepare("UPDATE supplier_orders SET status='unknown',error_message=? WHERE id=?");
             if ($stmt) { $stmt->bind_param('si', $exceptionMessage, $orderId); $stmt->execute(); $stmt->close(); }
-            commerceCenterSyncSafe('supplier_purchase', $orderId);
+            supplierBridgeCommerceSyncOrder($orderId);
         }
         return [
             'success' => false,
@@ -10139,7 +11381,7 @@ function supplierBridgeGetOrders(int $limit = 100): array
     global $conn;
     if (!storeBridgeEnsureSchema()) return [];
     $limit = max(1, min(500, $limit));
-    $result = $conn->query("SELECT so.*,
+    $result = $conn->query("SELECT so.*,sc.provider_type,
         COALESCE(sc.name,CONCAT('Supplier #',so.connection_id)) AS connection_name,
         COALESCE(u.username,CONCAT('Deleted user #',so.user_id)) AS username,
         COALESCE(p.name,sp.name,CONCAT('Product #',so.local_product_id)) AS product_name,
@@ -10168,6 +11410,14 @@ function supplierBridgeReconcileOrder(int $orderId): array
     $stmt->close();
     if (!$order) return ['success' => false, 'message' => 'Order not found'];
     if (in_array((string) $order['status'], ['success','refunded'], true)) return ['success' => true, 'message' => 'Order is already final'];
+    if (supplierBridgeProviderRequiresProtectedPurchase((string) ($order['provider_type'] ?? ''))) {
+        if ((string) $order['status'] !== 'manual_review') {
+            $message = 'This supplier has no verified purchase-history endpoint. This order requires manual review; automatic retry/refund is blocked.';
+            $update = $conn->prepare("UPDATE supplier_orders SET status='manual_review',error_message=?,updated_at=NOW() WHERE id=? AND status<>'success' AND status<>'refunded'");
+            if ($update) { $update->bind_param('si', $message, $orderId); $update->execute(); $update->close(); }
+        }
+        return ['success' => false, 'pending' => true, 'manual_review' => true, 'message' => 'Automatic reconciliation is unavailable; verify the supplier account manually before resolving this order.'];
+    }
     $api = supplierBridgeApiRequest($order, 'order_status', 'GET', ['external_ref' => (string) $order['external_ref']], 1);
     if (supplierBridgeOrderStatusDefinitelyNotFound($api, (string) $order['external_ref'])) {
         $createdTs = strtotime((string) ($order['created_at'] ?? ''));
@@ -10190,7 +11440,7 @@ function supplierBridgeReconcileOrder(int $orderId): array
                 $update->execute();
                 $update->close();
             }
-            commerceCenterSyncSafe('supplier_purchase', $orderId);
+            supplierBridgeCommerceSyncOrder($orderId);
             return ['success' => false, 'pending' => true, 'message' => $message];
         }
         $reason = 'Supplier confirmed that the order reference does not exist';
@@ -10224,7 +11474,7 @@ function supplierBridgeReconcileOrder(int $orderId): array
             $reviewMessage = 'Supplier reports failure but ' . $storedKeyCount . '/' . $requiredKeyCount . ' key(s) are already stored. Automatic refund was blocked.';
             $update = $conn->prepare("UPDATE supplier_orders SET status='manual_review',response_json=?,error_message=? WHERE id=?");
             if ($update) { $update->bind_param('ssi', $json, $reviewMessage, $orderId); $update->execute(); $update->close(); }
-            commerceCenterSyncSafe('supplier_purchase', $orderId);
+            supplierBridgeCommerceSyncOrder($orderId);
             return ['success' => false, 'message' => 'Supplier status conflicts with delivered keys; manual review is required.'];
         }
         return supplierBridgeRefundOrder($orderId, $reason) ? ['success' => true, 'message' => 'Order was refunded'] : ['success' => false, 'message' => 'Order failed but refund requires manual review'];
@@ -10267,7 +11517,7 @@ function supplierBridgeReconcileOrder(int $orderId): array
         $update->execute();
         $update->close();
     }
-    commerceCenterSyncSafe('supplier_purchase', $orderId);
+    supplierBridgeCommerceSyncOrder($orderId);
     return ['success' => false, 'pending' => true, 'message' => 'Supplier order is still processing'];
 }
 

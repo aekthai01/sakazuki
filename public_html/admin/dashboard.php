@@ -1099,6 +1099,27 @@ $recentPurchaseActivity = $isInstantFilterRequest ? [] : getPublicRecentPurchase
         let currentQtyData = {};
 
         let userBalance = <?php echo getUserBalance($_SESSION['user_id']); ?>;
+        const MAX_PURCHASE_QUANTITY = 100;
+
+        function getPurchaseQuantityLimit() {
+            const available = Math.max(0, parseInt(currentQtyData.availableQty || '0', 10) || 0);
+            return Math.min(MAX_PURCHASE_QUANTITY, available);
+        }
+
+        function normalizeQuantityInput() {
+            const input = document.getElementById('quantityInput');
+            if (!input) return 0;
+
+            const max = getPurchaseQuantityLimit();
+            input.max = String(max);
+
+            let quantity = parseInt(input.value, 10);
+            if (!Number.isFinite(quantity) || quantity < 1) quantity = 1;
+            if (max > 0 && quantity > max) quantity = max;
+
+            input.value = String(quantity);
+            return quantity;
+        }
 
         function selectVariant(duration, variantId, productId, productName, availableQty, price) {
             currentQtyData = { duration, variantId, productId, productName, availableQty, price };
@@ -1110,7 +1131,7 @@ $recentPurchaseActivity = $isInstantFilterRequest ? [] : getPublicRecentPurchase
             document.getElementById('qtyCombinedName').textContent = combinedName;
             document.getElementById('qtyPricePerKey').textContent = formatCurrency(price);
             document.getElementById('quantityInput').value = 1;
-            document.getElementById('quantityInput').max = availableQty;
+            document.getElementById('quantityInput').max = getPurchaseQuantityLimit();
             updateTotalAmount();
 
             document.getElementById('overlay').style.display = 'block';
@@ -1137,7 +1158,7 @@ $recentPurchaseActivity = $isInstantFilterRequest ? [] : getPublicRecentPurchase
 
         function updateTotalAmount() {
 
-            const quantity = parseInt(document.getElementById('quantityInput').value) || 1;
+            const quantity = normalizeQuantityInput();
 
             const total = quantity * currentQtyData.price;
 
@@ -1159,11 +1180,11 @@ $recentPurchaseActivity = $isInstantFilterRequest ? [] : getPublicRecentPurchase
 
             const input = document.getElementById('quantityInput');
 
-            const current = parseInt(input.value) || 1;
+            const current = normalizeQuantityInput();
 
             const newValue = current + delta;
 
-            const max = parseInt(input.max) || 1;
+            const max = getPurchaseQuantityLimit();
 
 
 
@@ -1181,9 +1202,15 @@ $recentPurchaseActivity = $isInstantFilterRequest ? [] : getPublicRecentPurchase
 
         function confirmPurchase() {
 
-            const quantity = parseInt(document.getElementById('quantityInput').value) || 1;
+            const quantity = normalizeQuantityInput();
+
+            const max = getPurchaseQuantityLimit();
 
             const total = quantity * currentQtyData.price;
+
+            if (quantity < 1 || quantity > max || !Number.isFinite(total) || total <= 0) {
+                return;
+            }
 
 
 

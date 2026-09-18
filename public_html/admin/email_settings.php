@@ -397,8 +397,12 @@ function recoveryLogPrettyDetails($raw): string
             $safeLogsForCopy = [];
             foreach ($mailLogs as $copyLog) {
                 $safeLogsForCopy[] = [
+                    'log_id' => (int) $copyLog['id'],
                     'time' => (string) $copyLog['created_at'],
                     'event' => (string) $copyLog['event_type'],
+                    'user_id' => isset($copyLog['user_id']) ? (int) $copyLog['user_id'] : null,
+                    'actor_id' => isset($copyLog['actor_id']) ? (int) $copyLog['actor_id'] : null,
+                    'request_ip' => (string) ($copyLog['request_ip'] ?? ''),
                     'status' => (string) $copyLog['status'],
                     'transport' => (string) $copyLog['transport'],
                     'stage' => (string) $copyLog['stage'],

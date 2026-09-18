@@ -68,6 +68,7 @@ html.nav-drawer-open,body.nav-drawer-open{overflow:hidden;overscroll-behavior:no
       <nav class="hidden 2xl:flex min-w-0 items-center space-x-1">
         <a href="dashboard.php" class="px-4 py-2 rounded-lg hover:bg-accent/10 hover:text-accent transition flex items-center" data-lang="nav.dashboard"><i class="bi bi-speedometer2 mr-2"></i><?php echo Lang::t('nav.dashboard'); ?></a>
         <a href="users.php" class="px-4 py-2 rounded-lg hover:bg-accent/10 hover:text-accent transition flex items-center" data-lang="nav.users"><i class="bi bi-people mr-2"></i><?php echo Lang::t('nav.users'); ?></a>
+        <a href="security.php" class="px-4 py-2 rounded-lg hover:bg-accent/10 hover:text-accent transition flex items-center" data-lang="nav.security"><i class="bi bi-shield-lock mr-2"></i><?php echo Lang::t('nav.security'); ?></a>
         <a href="products.php" class="px-4 py-2 rounded-lg hover:bg-accent/10 hover:text-accent transition flex items-center" data-lang="nav.products"><i class="bi bi-box-seam mr-2"></i><?php echo Lang::t('nav.products'); ?></a>
         <a href="transactions.php" class="px-4 py-2 rounded-lg hover:bg-accent/10 hover:text-accent transition flex items-center" data-lang="nav.transactions"><i class="bi bi-wallet2 mr-2"></i><?php echo Lang::t('nav.transactions'); ?></a>
         <a href="email_settings.php" class="px-4 py-2 rounded-lg hover:bg-accent/10 hover:text-accent transition flex items-center"><i class="bi bi-envelope-lock mr-2 text-blue-300"></i><?php echo $currentLang === 'en' ? 'Email Recovery' : 'กู้รหัสผ่าน'; ?></a>
@@ -160,6 +161,7 @@ html.nav-drawer-open,body.nav-drawer-open{overflow:hidden;overscroll-behavior:no
   <nav class="nav-drawer-scroll p-3 space-y-1 flex-1">
     <a href="dashboard.php" class="block px-4 py-2 rounded-lg hover:bg-accent/10 hover:text-accent transition" data-lang="nav.dashboard"><i class="bi bi-speedometer2 mr-2"></i><?php echo Lang::t('nav.dashboard'); ?></a>
     <a href="users.php" class="block px-4 py-2 rounded-lg hover:bg-accent/10 hover:text-accent transition" data-lang="nav.users"><i class="bi bi-people mr-2"></i><?php echo Lang::t('nav.users'); ?></a>
+    <a href="security.php" class="block px-4 py-2 rounded-lg hover:bg-accent/10 hover:text-accent transition" data-lang="nav.security"><i class="bi bi-shield-lock mr-2"></i><?php echo Lang::t('nav.security'); ?></a>
     <a href="resellers.php" class="block px-4 py-2 rounded-lg hover:bg-accent/10 hover:text-accent transition" data-lang="nav.resellers"><i class="bi bi-person-badge mr-2"></i><?php echo Lang::t('nav.resellers'); ?></a>
     <a href="reseller-prices.php" class="block px-4 py-2 rounded-lg hover:bg-accent/10 hover:text-accent transition" data-lang="nav.special_prices"><i class="bi bi-tags mr-2"></i><?php echo Lang::t('nav.special_prices'); ?></a>
     <a href="products.php" class="block px-4 py-2 rounded-lg hover:bg-accent/10 hover:text-accent transition" data-lang="nav.products"><i class="bi bi-box-seam mr-2"></i><?php echo Lang::t('nav.products'); ?></a>

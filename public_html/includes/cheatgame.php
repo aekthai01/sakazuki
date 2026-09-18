@@ -4846,6 +4846,17 @@ if (!function_exists('cgoStorefrontPurchaseErrorMessage')) {
         $code = strtolower(trim((string) ($purchase['code'] ?? '')));
         $source = strtolower(trim((string) ($purchase['source'] ?? '')));
 
+        // A manual-review order may have committed upstream. Its balance stays
+        // reserved until an administrator verifies the supplier side, so never
+        // tell the customer that an automatic history lookup will resolve it.
+        if (!empty($purchase['manual_review'])) {
+            $orderId = max(0, (int) ($purchase['order_id'] ?? 0));
+            $suffix = $orderId > 0 ? ' #' . $orderId : '';
+            return $isThai
+                ? 'คำสั่งซื้อ' . $suffix . ' ต้องตรวจสอบกับผู้ให้บริการโดยแอดมิน ยอดถูกพักไว้เพื่อป้องกันการหักซ้ำ กรุณาอย่ากดซื้อรายการเดิมซ้ำจนกว่าสถานะจะถูกยืนยัน'
+                : 'Order' . $suffix . ' requires administrator verification with the supplier. Your balance remains reserved to prevent a duplicate charge; do not retry the same item until it is resolved.';
+        }
+
         // A pending remote order is NOT a normal checkout failure. Its balance
         // was already reserved, so explicitly stop the customer from retrying.
         if (!empty($purchase['pending']) || !empty($purchase['processing']) || in_array($code, ['existing_pending_order', 'existing_pending_supplier_order'], true)) {

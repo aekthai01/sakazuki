@@ -191,7 +191,7 @@ storeBridgeTimelineMark($requestTimeline, 'action_dispatch_started', $requestSta
 // to mutate/read the shared financial ledger. Require an additional HMAC over
 // the exact JSON body + action + short-lived timestamp before dispatching any
 // shared_* operation. This fails closed if the private shared secret is missing.
-$sharedInternalActions = ['shared_claim', 'shared_reserve', 'shared_complete', 'shared_release', 'shared_history_status', 'shared_history_import'];
+$sharedInternalActions = ['shared_claim', 'shared_reserve', 'shared_complete', 'shared_release', 'shared_history_status', 'shared_history_import', 'shared_security_check', 'shared_security_block', 'shared_security_unblock', 'shared_security_touch_device', 'shared_security_list', 'shared_security_device_detail', 'shared_security_account_devices'];
 if (in_array($action, $sharedInternalActions, true)) {
     if ($method !== 'POST') {
         $send(['success' => false, 'code' => 'method_not_allowed', 'message' => 'Shared ledger requires POST'], 405, $clientId, $action);
@@ -332,6 +332,17 @@ if ($action === 'order_status') {
         $send(['success' => false, 'code' => (string) ($result['code'] ?? 'order_not_found'), 'message' => (string) ($result['message'] ?? 'Order not found')], (int) ($result['http_code'] ?? 404), $clientId, $action);
     }
     $send(['success' => true, 'data' => $result['data']], 200, $clientId, $action);
+}
+
+
+if (in_array($action, ['shared_security_check', 'shared_security_block', 'shared_security_unblock', 'shared_security_touch_device', 'shared_security_list', 'shared_security_device_detail', 'shared_security_account_devices'], true)) {
+    if ($method !== 'POST') {
+        $send(['success' => false, 'code' => 'method_not_allowed', 'message' => 'Shared security requires POST'], 405, $clientId, $action);
+    }
+    $result = sharedSecurityApiAction($action, $input);
+    $httpCode = (int) ($result['http_code'] ?? 500);
+    unset($result['http_code']);
+    $send($result, $httpCode, $clientId, $action);
 }
 
 if (in_array($action, ['shared_claim', 'shared_reserve', 'shared_complete', 'shared_release'], true)) {

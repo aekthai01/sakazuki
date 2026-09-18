@@ -126,6 +126,12 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
             'order_rate_limit_per_minute' => $postString('order_rate_limit_per_minute', '10'),
             'max_order_amount' => $postString('max_order_amount', '0'),
             'daily_spend_limit' => $postString('daily_spend_limit', '0'),
+            'source_access' => [
+                'cgo' => isset($_POST['allow_cgo']),
+                'supplier_connection_ids' => isset($_POST['supplier_connection_ids']) && is_array($_POST['supplier_connection_ids'])
+                    ? $_POST['supplier_connection_ids']
+                    : [],
+            ],
         ]);
         if (empty($result['success'])) storeBridgeAdminFlashRedirect('', (string) ($result['message'] ?? $t('แก้ไขลูกค้า API ไม่สำเร็จ', 'API client update failed.')));
         logHistory($adminId, 'store_api_client_update', 'Updated Store API client #' . $clientId);
@@ -204,6 +210,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
             'endpoint_url' => $postString('endpoint_url'),
             'api_key' => $postString('api_key'),
             'priority' => $postString('priority', '100'),
+            'purchase_mode' => $postString('purchase_mode', 'live'),
             'auto_publish' => isset($_POST['auto_publish']),
             'sync_details' => isset($_POST['sync_details']),
             'sync_prices' => isset($_POST['sync_prices']),
@@ -239,6 +246,7 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
             'endpoint_url' => $postString('endpoint_url'),
             'api_key' => $postString('api_key'),
             'priority' => $postString('priority', '100'),
+            'purchase_mode' => $postString('purchase_mode', ''),
             'auto_publish' => isset($_POST['auto_publish']),
             'sync_details' => isset($_POST['sync_details']),
             'sync_prices' => isset($_POST['sync_prices']),
@@ -287,6 +295,21 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
         }
         logHistory($adminId, 'supplier_order_reconcile', 'Reconciled supplier order #' . $orderId);
         storeBridgeAdminFlashRedirect((string) ($result['message'] ?? $t('ตรวจสอบคำสั่งซื้อแล้ว', 'Order reconciled.')));
+    }
+
+    if ($action === 'manual_confirm_supplier_order') {
+        $orderId = (int) $postString('order_id', '0');
+        $rawKeys = isset($_POST['manual_keys']) && is_scalar($_POST['manual_keys']) ? trim((string) $_POST['manual_keys']) : '';
+        $result = supplierBridgeAdminConfirmOrderSuccess($orderId, $rawKeys, $adminId);
+        if (empty($result['success'])) storeBridgeAdminFlashRedirect('', (string) ($result['message'] ?? $t('ยืนยันคำสั่งซื้อไม่สำเร็จ', 'Unable to confirm supplier order.')));
+        storeBridgeAdminFlashRedirect((string) ($result['message'] ?? $t('ยืนยันคำสั่งซื้อแล้ว', 'Supplier order confirmed.')));
+    }
+
+    if ($action === 'manual_refund_supplier_order') {
+        $orderId = (int) $postString('order_id', '0');
+        $result = supplierBridgeAdminRefundOrder($orderId, $adminId, isset($_POST['confirmed_no_supplier_order']));
+        if (empty($result['success'])) storeBridgeAdminFlashRedirect('', (string) ($result['message'] ?? $t('คืนยอดคำสั่งซื้อไม่สำเร็จ', 'Unable to refund supplier order.')));
+        storeBridgeAdminFlashRedirect((string) ($result['message'] ?? $t('คืนยอดคำสั่งซื้อแล้ว', 'Supplier order refunded.')));
     }
 
     if ($action === 'test_client_webhook') {
@@ -378,17 +401,19 @@ The billing mode is configured by the provider, NOT chosen in each order request
 - reseller_wallet: the API is linked to one reseller account and purchases debit users.balance directly. The reseller can top up through the normal website deposit flow. API prices use the linked reseller account's effective reseller price, including account-specific variant pricing.
 
 Product visibility/pricing rule by billing mode:
-- api_balance: legacy per-API-key product enable/disable rules, Custom API Price, price tier and multiplier are supported.
-- reseller_wallet: uses this provider endpoint's active product/variant catalogue and the linked reseller account's effective reseller price. It intentionally ignores legacy per-key Custom API Price, multiplier and disabled-product rules so switching billing mode cannot silently hide products or use stale API pricing. Availability is local-first with an automatic CGO fallback when that variant is linked/enabled and the Store API selling price covers the CGO cost. The advertised stock is the largest quantity one source can fulfill by itself (max(Local, CGO)), never Local+CGO combined. One order is fulfilled by one source in full; the provider source is internal and does not change the reseller integration.
+- api_balance: legacy per-API-key product enable/disable rules, Custom API Price, price tier and multiplier are supported. CGO/Store Bridge supplier access follows the same per-client source checkboxes in API Hub and debits/refunds the isolated API credit balance.
+- reseller_wallet: uses this provider endpoint's active product/variant catalogue and the linked reseller account's effective reseller price. It intentionally ignores legacy per-key Custom API Price, multiplier and disabled-product rules so switching billing mode cannot silently hide products or use stale API pricing. Availability is LOCAL-first, then only CGO/Store Bridge supplier connections explicitly enabled for this API client. The advertised stock is the largest quantity one permitted source can fulfill by itself, never a sum of independent source pools. One order is fulfilled by one source in full; the provider source is internal and does not change the reseller integration.
 
 For reseller_wallet, the linked reseller account is the PAYER only. Keys delivered by Store API are external API deliveries and are returned by order/order_status; they are not inserted into the reseller account's local My Keys entitlement. This prevents one sale from being counted as both an external Store API sale and a direct local-key purchase.
 
-CGO fallback checkout rule:
+Fulfillment source rule:
 - If LOCAL has the full requested quantity, LOCAL is used.
-- If LOCAL cannot fulfill the whole order and the linked CGO source can, the whole order is procured from CGO. Local and CGO keys are never mixed inside one Store API order.
-- CGO catalogue/stock is read from the cached supplier snapshot for fast products/inventory responses. action=order is authoritative at checkout.
-- If supplier acceptance is uncertain, the Store API order stays processing and returns HTTP 202. Do NOT create a second purchase; poll action=order_status with the same order_id/external_ref.
-- Store API billing is debited once. CGO runs in procurement-only mode and does not debit the reseller/API balance a second time. A proven terminal pre-delivery failure is automatically refunded and recorded in the financial audit ledger.
+- If LOCAL cannot fulfill the whole order, CGO is considered only when this API client allows CGO.
+- If CGO cannot fulfill it, permitted Store Bridge supplier connections are considered in configured source priority. VIPSTORE/StarkMods/other supplier stock is never exposed to a client unless the provider explicitly enables that connection for the client.
+- Cached source stock is used for fast products/inventory responses; action=order performs the authoritative checkout-time verification.
+- Stock pools are never added together and one Store API order never mixes keys from multiple fulfillment sources.
+- If upstream acceptance is uncertain, the Store API order stays processing and returns HTTP 202. Do NOT create a second purchase; poll action=order_status with the same order_id/external_ref.
+- Store API billing is debited once. CGO and Store Bridge supplier children run in procurement-only mode and do not debit the reseller balance a second time. A proven terminal pre-delivery failure is automatically refunded and recorded in the financial audit ledger.
 
 Check the active mode with GET action=balance. The response includes billing_mode. Spending limits and request/order quotas are configured per API client unless the provider tells you otherwise. Quotas are enforced across the whole API client/key, not separately per source IP.
 
@@ -896,9 +921,10 @@ $storeBridgeKeyInfo = storeBridgeEncryptionKeyInfo();
                         <?php foreach ($providerTypes as $typeKey => $typeData): ?><option value="<?php echo $h($typeKey); ?>"><?php echo $h($isTh ? $typeData['label_th'] : $typeData['label_en']); ?></option><?php endforeach; ?>
                     </select>
                 </label>
-                <label class="md:col-span-2 text-sm text-gray-300"><?php echo $h($t('Endpoint URL ของเว็บต้นทาง', 'Source website endpoint URL')); ?><input class="field mt-1" type="url" name="endpoint_url" maxlength="1000" required placeholder="https://sakazuki.spwz.online/api/store/v1.php"></label>
-                <label class="md:col-span-2 text-sm text-gray-300"><?php echo $h($t('API Key จากเว็บต้นทาง', 'API key from source website')); ?><input class="field mt-1 font-mono" type="password" name="api_key" maxlength="500" autocomplete="new-password" required></label>
+                <label class="md:col-span-2 text-sm text-gray-300"><?php echo $h($t('Endpoint URL ของเว็บต้นทาง', 'Source website endpoint URL')); ?><input class="field mt-1" type="url" name="endpoint_url" maxlength="1000" required placeholder="https://starkmods.my.id/"></label>
+                <label class="md:col-span-2 text-sm text-gray-300"><?php echo $h($t('Credential จากเว็บต้นทาง', 'Source provider credential')); ?><input class="field mt-1 font-mono" type="password" name="api_key" maxlength="500" autocomplete="new-password" required><span class="block mt-1 text-xs text-gray-500"><?php echo $h($t('Sakazuki ใช้ API Key ตามเดิม · VIPSTORE ใช้ JSON {email,password,currency} · StarkMods ใช้ JSON {username,password,currency} ถ้าหน่วยราคาต้นทางต่างจากสกุลเว็บให้เพิ่ม local_rate (สกุลเว็บต่อ 1 หน่วย Supplier) ระบบเข้ารหัสก่อนเก็บ', 'Sakazuki uses its API key as before. VIPSTORE uses JSON {email,password,currency}; StarkMods uses JSON {username,password,currency}. When source price units differ from the website currency, also set local_rate (local currency per supplier unit). The credential is encrypted before storage.')); ?></span></label>
                 <label class="text-sm text-gray-300"><?php echo $h($t('ลำดับความสำคัญ (เลขน้อยมาก่อน)', 'Priority (lower first)')); ?><input class="field mt-1" type="number" name="priority" value="100" required></label>
+                <label class="text-sm text-gray-300"><?php echo $h($t('โหมดการซื้อ', 'Purchase mode')); ?><select class="field mt-1" name="purchase_mode"><option value="live"><?php echo $h($t('Live - ซื้อจริง', 'Live - real purchases')); ?></option><option value="test"><?php echo $h($t('Test - เฉพาะ Admin', 'Test - admin only')); ?></option><option value="disabled"><?php echo $h($t('Disabled - ไม่ซื้อ', 'Disabled - no purchases')); ?></option></select><span class="block mt-1 text-xs text-amber-300/80"><?php echo $h($t('VIPSTORE และ StarkMods ใหม่จะถูกบังคับเป็น Disabled ครั้งแรก ไม่ว่าค่านี้เป็นอะไร เพื่อกันเปิดซื้อจริงโดยไม่ตั้งใจ', 'New VIPSTORE and StarkMods connections are forced to Disabled on first save to prevent accidental live purchasing.')); ?></span></label>
                 <label class="text-sm text-gray-300"><?php echo $h($t('ราคาผู้ใช้เริ่มต้น', 'Default user pricing')); ?><select class="field mt-1" name="user_price_mode"><option value="source"><?php echo $h($t('ตามราคาแนะนำเว็บต้นทาง', 'Match source suggested price')); ?></option><option value="markup"><?php echo $h($t('ต้นทุน API + เปอร์เซ็นต์', 'API cost + markup')); ?></option><option value="keep"><?php echo $h($t('คงราคาปัจจุบัน', 'Keep current local price')); ?></option></select></label>
                 <label class="text-sm text-gray-300"><?php echo $h($t('ราคาตัวแทนเริ่มต้น', 'Default reseller pricing')); ?><select class="field mt-1" name="reseller_price_mode"><option value="source"><?php echo $h($t('ตามราคาแนะนำเว็บต้นทาง', 'Match source suggested price')); ?></option><option value="markup"><?php echo $h($t('ต้นทุน API + เปอร์เซ็นต์', 'API cost + markup')); ?></option><option value="keep"><?php echo $h($t('คงราคาปัจจุบัน', 'Keep current local price')); ?></option></select></label>
                 <label class="text-sm text-gray-300"><?php echo $h($t('กำไรผู้ใช้เมื่อใช้โหมดบวกเปอร์เซ็นต์ (%)', 'User markup when markup mode (%)')); ?><input class="field mt-1" type="number" step="0.01" min="0" max="10000" name="user_markup_percent" value="20" required></label>
@@ -925,7 +951,12 @@ $storeBridgeKeyInfo = storeBridgeEncryptionKeyInfo();
                 <tbody class="divide-y divide-white/5">
                 <?php if ($clients === []): ?><tr><td colspan="8" class="p-6 text-center text-gray-500"><?php echo $h($t('ยังไม่มี API Key', 'No API clients yet.')); ?></td></tr><?php endif; ?>
                 <?php foreach ($clients as $client): ?>
-                    <?php $clientBilling = storeBridgeNormalizeBillingMode($client['billing_mode'] ?? 'api_balance'); $clientIsWallet = $clientBilling === 'reseller_wallet'; ?>
+                    <?php
+                        $clientBilling = storeBridgeNormalizeBillingMode($client['billing_mode'] ?? 'api_balance');
+                        $clientIsWallet = $clientBilling === 'reseller_wallet';
+                        $clientSourceAccess = storeBridgeClientSourceAccess($client);
+                        $clientSupplierIds = array_fill_keys(storeBridgeClientAllowedSupplierConnectionIds($client), true);
+                    ?>
                     <tr class="align-top">
                         <td class="p-3">
                             <div class="font-semibold">#<?php echo (int) $client['id']; ?> <?php echo $h($client['name']); ?></div>
@@ -955,7 +986,7 @@ $storeBridgeKeyInfo = storeBridgeEncryptionKeyInfo();
                         <td class="p-3 text-center"><?php echo (int) $client['order_count']; ?><div class="text-xs text-gray-500"><?php echo $h(formatCurrency((float) $client['total_spent'])); ?></div></td>
                         <td class="p-3"><span class="badge <?php echo $client['status'] === 'active' ? 'bg-emerald-500/20 text-emerald-200' : 'bg-red-500/20 text-red-200'; ?>"><?php echo $h($client['status']); ?></span><div class="text-xs text-gray-500 mt-2">all <?php echo (int) $client['rate_limit_per_minute']; ?>/min · order <?php echo (int) ($client['order_rate_limit_per_minute'] ?? 10); ?>/min</div></td>
                         <td class="p-3 space-y-2 min-w-[500px]">
-                            <?php if (!$clientIsWallet): ?><div class="flex flex-wrap gap-2"><a class="btn btn-primary !py-2" href="api_client_products.php?client_id=<?php echo (int) $client['id']; ?>"><i class="bi bi-tags"></i><?php echo $h($t('กำหนดราคาสินค้ารายชิ้น', 'Per-product API pricing')); ?></a></div><?php else: ?><div class="text-xs rounded-lg border border-amber-500/20 bg-amber-500/10 p-2 text-amber-100"><?php echo $h($t('โหมดบัญชีตัวแทนใช้สินค้าที่ Store API เปิดให้และราคาตัวแทนของบัญชีที่ผูก โดยไม่ใช้ Custom API price/Multiplier เดิม หาก LOCAL ไม่พอทั้งออเดอร์ ระบบสามารถใช้ CGO ที่มี Mapping และสต๊อก Cached เพียงพอได้อัตโนมัติ', 'Linked-wallet mode uses the active Store API catalogue and linked reseller pricing, ignoring legacy custom API price/multiplier. If LOCAL cannot satisfy the whole order, an eligible mapped CGO source with sufficient cached capacity can be used automatically.')); ?></div><?php endif; ?>
+                            <?php if (!$clientIsWallet): ?><div class="flex flex-wrap gap-2"><a class="btn btn-primary !py-2" href="api_client_products.php?client_id=<?php echo (int) $client['id']; ?>"><i class="bi bi-tags"></i><?php echo $h($t('กำหนดราคาสินค้ารายชิ้น', 'Per-product API pricing')); ?></a></div><?php else: ?><div class="text-xs rounded-lg border border-amber-500/20 bg-amber-500/10 p-2 text-amber-100"><?php echo $h($t('โหมดบัญชีตัวแทนใช้สินค้าที่ Store API เปิดให้และราคาตัวแทนของบัญชีที่ผูก โดยไม่ใช้ Custom API price/Multiplier เดิม แหล่งสต็อกใช้ LOCAL ก่อน แล้วจึง CGO/Supplier เฉพาะแหล่งที่ Admin อนุญาตให้ API Client นี้', 'Linked-wallet mode uses the active Store API catalogue and linked reseller pricing, ignoring legacy custom API price/multiplier. Fulfillment is LOCAL first, then only CGO/supplier sources explicitly allowed for this API client.')); ?></div><?php endif; ?>
                             <?php if (trim((string) ($client['webhook_url'] ?? '')) !== ''): ?>
                                 <?php
                                     $webhookDebugRaw = trim((string) ($client['webhook_last_debug_json'] ?? ''));
@@ -1010,6 +1041,35 @@ $storeBridgeKeyInfo = storeBridgeEncryptionKeyInfo();
                                     <label class="text-[11px] text-gray-500">Order req/min<input class="field !py-2 mt-1" type="number" min="1" max="1000" name="order_rate_limit_per_minute" value="<?php echo (int) ($client['order_rate_limit_per_minute'] ?? 10); ?>"></label>
                                     <label class="text-[11px] text-gray-500">Max / order (0=∞)<input class="field !py-2 mt-1" type="number" min="0" step="0.01" name="max_order_amount" value="<?php echo $h((string) ($client['max_order_amount'] ?? '0')); ?>"></label>
                                     <label class="text-[11px] text-gray-500">Daily limit (0=∞)<input class="field !py-2 mt-1" type="number" min="0" step="0.01" name="daily_spend_limit" value="<?php echo $h((string) ($client['daily_spend_limit'] ?? '0')); ?>"></label>
+                                    <div class="col-span-2 rounded-lg border border-violet-500/20 bg-violet-500/5 p-3">
+                                        <div class="text-xs font-bold text-violet-100"><?php echo $h($t('แหล่งสต็อกที่ API Client นี้อนุญาต', 'Stock sources allowed for this API client')); ?></div>
+                                        <div class="text-[11px] text-gray-400 mt-1"><?php echo $h($t('LOCAL เปิดเสมอ ระบบจะไม่รวมสต็อกหลายแหล่งเข้าด้วยกัน และจะเลือกแหล่งเดียวที่ส่งจำนวนทั้งหมดได้', 'LOCAL is always available. Stock pools are never summed; one source must fulfill the entire quantity.')); ?></div>
+                                        <label class="mt-3 flex items-center gap-2 text-xs">
+                                            <input type="checkbox" name="allow_cgo" value="1" <?php echo !empty($clientSourceAccess['cgo']) ? 'checked' : ''; ?>>
+                                            <span>CGO</span>
+                                        </label>
+                                        <div class="mt-3 grid gap-2">
+                                            <?php foreach ($connections as $sourceConnection): ?>
+                                                <?php
+                                                    $sourceConnectionId = (int)($sourceConnection['id'] ?? 0);
+                                                    if ($sourceConnectionId < 1) continue;
+                                                    $sourceChecked = isset($clientSupplierIds[$sourceConnectionId]);
+                                                    $sourceLive = (string)($sourceConnection['status'] ?? '') === 'active'
+                                                        && strtolower(trim((string)($sourceConnection['purchase_mode'] ?? 'live'))) === 'live';
+                                                ?>
+                                                <label class="flex items-start gap-2 rounded border border-white/10 bg-black/10 px-2 py-2 text-xs">
+                                                    <input type="checkbox" name="supplier_connection_ids[]" value="<?php echo $sourceConnectionId; ?>"
+                                                        <?php echo $sourceChecked ? 'checked' : ''; ?>>
+                                                    <span>
+                                                        <strong><?php echo $h((string)($sourceConnection['name'] ?? ('Supplier #'.$sourceConnectionId))); ?></strong>
+                                                        <span class="text-gray-500"> · <?php echo $h((string)($sourceConnection['provider_type'] ?? 'generic')); ?> · <?php echo $sourceLive ? 'LIVE' : $h($t('ยังไม่พร้อมขาย', 'not live')); ?></span>
+                                                    </span>
+                                                </label>
+                                            <?php endforeach; ?>
+                                            <?php if ($connections === []): ?><div class="text-[11px] text-gray-500"><?php echo $h($t('ยังไม่มี Supplier Connection', 'No supplier connections yet.')); ?></div><?php endif; ?>
+                                        </div>
+                                        <div class="text-[11px] text-gray-400 mt-2"><?php echo $h($t('ใช้ได้ทั้งยอดเครดิต API และบัญชีตัวแทนเว็บไซต์ โดย Store API parent จะหัก/คืนเงินกลับไปยังแหล่งเครดิตตาม Billing Mode ของ Client นี้', 'Available with both API credit and linked reseller wallet billing. The Store API parent debits/refunds the balance owned by this client billing mode.')); ?></div>
+                                    </div>
                                     <button class="btn btn-soft !py-2 col-span-2" type="submit"><i class="bi bi-save"></i><?php echo $h($t('บันทึก', 'Save')); ?></button>
                                 </form>
                             </details>
@@ -1122,7 +1182,7 @@ $storeBridgeKeyInfo = storeBridgeEncryptionKeyInfo();
             <details class="glass rounded-xl" <?php echo !empty($connection['last_error']) ? 'open' : ''; ?>>
                 <summary class="p-5 flex flex-wrap gap-4 items-center justify-between">
                     <div><div class="font-bold text-lg">#<?php echo (int) $connection['id']; ?> <?php echo $h($connection['name']); ?></div><div class="text-xs text-gray-500 mt-1 break-all"><?php echo $h($connection['endpoint_url']); ?></div></div>
-                    <div class="flex flex-wrap gap-2 items-center"><span class="badge bg-sky-500/20 text-sky-200"><?php echo $h($connection['provider_type']); ?></span><span class="badge <?php echo $connection['status'] === 'active' ? 'bg-emerald-500/20 text-emerald-200' : 'bg-red-500/20 text-red-200'; ?>"><?php echo $h($connection['status']); ?></span><span class="text-sm text-gray-400"><?php echo (int) $connection['product_count']; ?> <?php echo $h($t('สินค้า', 'products')); ?></span></div>
+                    <div class="flex flex-wrap gap-2 items-center"><span class="badge bg-sky-500/20 text-sky-200"><?php echo $h($connection['provider_type']); ?></span><span class="badge <?php echo $connection['status'] === 'active' ? 'bg-emerald-500/20 text-emerald-200' : 'bg-red-500/20 text-red-200'; ?>"><?php echo $h($connection['status']); ?></span><span class="badge bg-amber-500/15 text-amber-200"><?php echo $h('purchase:' . ($connection['purchase_mode'] ?? 'live')); ?></span><span class="text-sm text-gray-400"><?php echo (int) $connection['product_count']; ?> <?php echo $h($t('สินค้า', 'products')); ?></span></div>
                 </summary>
                 <div class="border-t border-white/10 p-5">
                     <?php if (!empty($connection['last_error'])): ?><div class="mb-4 rounded-lg border border-red-500/30 bg-red-900/20 p-3 text-sm text-red-200"><?php echo $h($connection['last_error']); ?></div><?php endif; ?>
@@ -1131,8 +1191,9 @@ $storeBridgeKeyInfo = storeBridgeEncryptionKeyInfo();
                             <?php echo csrfField(); ?><input type="hidden" name="action" value="update_connection"><input type="hidden" name="connection_id" value="<?php echo (int) $connection['id']; ?>">
                             <label class="text-xs text-gray-400"><?php echo $h($t('ชื่อ', 'Name')); ?><input class="field mt-1" name="name" value="<?php echo $h($connection['name']); ?>" required></label>
                             <label class="md:col-span-2 text-xs text-gray-400">Endpoint<input class="field mt-1" type="url" name="endpoint_url" value="<?php echo $h($connection['endpoint_url']); ?>" required></label>
-                            <label class="text-xs text-gray-400"><?php echo $h($t('API Key ใหม่ (เว้นว่างเพื่อใช้เดิม)', 'New API key (blank keeps current)')); ?><input class="field mt-1" type="password" name="api_key" autocomplete="new-password"></label>
+                            <label class="text-xs text-gray-400"><?php echo $h($t('Credential ใหม่ (เว้นว่างเพื่อใช้เดิม)', 'New credential (blank keeps current)')); ?><input class="field mt-1" type="password" name="api_key" autocomplete="new-password"></label>
                             <label class="text-xs text-gray-400"><?php echo $h($t('ลำดับ', 'Priority')); ?><input class="field mt-1" type="number" name="priority" value="<?php echo (int) $connection['priority']; ?>"></label>
+                            <label class="text-xs text-gray-400"><?php echo $h($t('โหมดการซื้อ', 'Purchase mode')); ?><select class="field mt-1" name="purchase_mode"><?php foreach (supplierBridgePurchaseModes() as $purchaseMode): ?><option value="<?php echo $h($purchaseMode); ?>" <?php echo (($connection['purchase_mode'] ?? 'live') === $purchaseMode) ? 'selected' : ''; ?>><?php echo $h($purchaseMode); ?></option><?php endforeach; ?></select></label>
                             <label class="text-xs text-gray-400"><?php echo $h($t('โหมดราคาผู้ใช้เริ่มต้น', 'Default user price mode')); ?><select class="field mt-1" name="user_price_mode"><option value="source" <?php echo ($connection['user_price_mode']??'source')==='source'?'selected':''; ?>><?php echo $h($t('ตามต้นทาง', 'Match source')); ?></option><option value="markup" <?php echo ($connection['user_price_mode']??'')==='markup'?'selected':''; ?>><?php echo $h($t('ทุน + %', 'Cost + %')); ?></option><option value="keep" <?php echo ($connection['user_price_mode']??'')==='keep'?'selected':''; ?>><?php echo $h($t('คงราคาเดิม', 'Keep current')); ?></option></select></label>
                             <label class="text-xs text-gray-400"><?php echo $h($t('โหมดราคาตัวแทนเริ่มต้น', 'Default reseller price mode')); ?><select class="field mt-1" name="reseller_price_mode"><option value="source" <?php echo ($connection['reseller_price_mode']??'source')==='source'?'selected':''; ?>><?php echo $h($t('ตามต้นทาง', 'Match source')); ?></option><option value="markup" <?php echo ($connection['reseller_price_mode']??'')==='markup'?'selected':''; ?>><?php echo $h($t('ทุน + %', 'Cost + %')); ?></option><option value="keep" <?php echo ($connection['reseller_price_mode']??'')==='keep'?'selected':''; ?>><?php echo $h($t('คงราคาเดิม', 'Keep current')); ?></option></select></label>
                             <label class="text-xs text-gray-400"><?php echo $h($t('กำไรผู้ใช้เมื่อใช้ทุน + %', 'User markup for cost + %')); ?><input class="field mt-1" type="number" step="0.01" min="0" max="10000" name="user_markup_percent" value="<?php echo $h($connection['user_markup_percent']); ?>"></label>
@@ -1212,7 +1273,46 @@ $storeBridgeKeyInfo = storeBridgeEncryptionKeyInfo();
 
         <div class="glass rounded-xl overflow-hidden">
             <div class="p-5 border-b border-white/10"><h2 class="font-bold text-lg"><i class="bi bi-box-arrow-in-down-right mr-2 text-sky-300"></i><?php echo $h($t('คำสั่งซื้อที่เว็บนี้ซื้อจาก Supplier', 'Supplier orders')); ?></h2></div>
-            <div class="overflow-auto max-h-[560px]"><table class="w-full min-w-[850px] text-sm"><thead class="sticky top-0 bg-gray-900"><tr><th class="p-3 text-left">ID / Ref</th><th class="p-3 text-left"><?php echo $h($t('Supplier', 'Supplier')); ?></th><th class="p-3 text-left"><?php echo $h($t('ผู้ซื้อ/สินค้า', 'Buyer / product')); ?></th><th class="p-3 text-right"><?php echo $h($t('ยอดขาย', 'Sale total')); ?></th><th class="p-3 text-left"><?php echo $h($t('สถานะ', 'Status')); ?></th><th class="p-3"></th></tr></thead><tbody class="divide-y divide-white/5"><?php foreach ($supplierOrders as $order): ?><tr><td class="p-3">#<?php echo (int) $order['id']; ?><div class="text-xs text-gray-500"><?php echo $h($order['external_ref']); ?></div></td><td class="p-3"><?php echo $h($order['connection_name']); ?></td><td class="p-3"><?php echo $h($order['username']); ?><div class="text-xs text-gray-400"><?php echo $h($order['product_name'] . ' - ' . $order['duration']); ?> × <?php echo (int) $order['quantity']; ?></div></td><td class="p-3 text-right"><?php echo $h(number_format((float) $order['total_price_base'], 2)); ?><div class="text-xs text-gray-500">cost <?php echo $h(number_format((float) $order['total_cost_base'], 2)); ?></div></td><td class="p-3"><span class="badge bg-white/10"><?php echo $h($order['status']); ?></span><div class="text-xs text-gray-500 mt-1"><?php echo (int) $order['delivered_count']; ?>/<?php echo (int) $order['quantity']; ?> keys</div></td><td class="p-3"><?php if (in_array((string) $order['status'], ['unknown','processing','manual_review','submitting'], true)): ?><form method="post"><?php echo csrfField(); ?><input type="hidden" name="action" value="reconcile_order"><input type="hidden" name="order_id" value="<?php echo (int) $order['id']; ?>"><button class="btn btn-soft !py-2" type="submit"><i class="bi bi-search"></i><?php echo $h($t('ตรวจสอบ', 'Reconcile')); ?></button></form><?php endif; ?></td></tr><?php endforeach; ?><?php if ($supplierOrders === []): ?><tr><td colspan="6" class="p-6 text-center text-gray-500"><?php echo $h($t('ยังไม่มีคำสั่งซื้อ', 'No orders yet.')); ?></td></tr><?php endif; ?></tbody></table></div>
+            <div class="overflow-auto max-h-[560px]">
+                <table class="w-full min-w-[980px] text-sm">
+                    <thead class="sticky top-0 bg-gray-900"><tr><th class="p-3 text-left">ID / Ref</th><th class="p-3 text-left"><?php echo $h($t('Supplier', 'Supplier')); ?></th><th class="p-3 text-left"><?php echo $h($t('ผู้ซื้อ/สินค้า', 'Buyer / product')); ?></th><th class="p-3 text-right"><?php echo $h($t('ยอดขาย', 'Sale total')); ?></th><th class="p-3 text-left"><?php echo $h($t('สถานะ', 'Status')); ?></th><th class="p-3"><?php echo $h($t('จัดการ', 'Actions')); ?></th></tr></thead>
+                    <tbody class="divide-y divide-white/5">
+                    <?php foreach ($supplierOrders as $order): ?>
+                        <?php $isProtectedManual = supplierBridgeProviderRequiresProtectedPurchase((string) ($order['provider_type'] ?? '')) && in_array((string) $order['status'], ['unknown','processing','manual_review','submitting'], true); ?>
+                        <tr class="align-top">
+                            <td class="p-3">#<?php echo (int) $order['id']; ?><div class="text-xs text-gray-500"><?php echo $h($order['external_ref']); ?></div></td>
+                            <td class="p-3"><?php echo $h($order['connection_name']); ?><div class="text-xs text-gray-500"><?php echo $h($order['provider_type'] ?? ''); ?></div></td>
+                            <td class="p-3"><?php echo $h($order['username']); ?><div class="text-xs text-gray-400"><?php echo $h($order['product_name'] . ' - ' . $order['duration']); ?> × <?php echo (int) $order['quantity']; ?></div></td>
+                            <td class="p-3 text-right"><?php echo $h(number_format((float) $order['total_price_base'], 2)); ?><div class="text-xs text-gray-500">cost <?php echo $h(number_format((float) $order['total_cost_base'], 2)); ?></div></td>
+                            <td class="p-3"><span class="badge bg-white/10"><?php echo $h($order['status']); ?></span><div class="text-xs text-gray-500 mt-1"><?php echo (int) $order['delivered_count']; ?>/<?php echo (int) $order['quantity']; ?> keys</div></td>
+                            <td class="p-3 min-w-[300px]">
+                                <?php if ($isProtectedManual): ?>
+                                    <details class="rounded-lg border border-amber-500/20 bg-amber-500/5 p-2">
+                                        <summary class="cursor-pointer text-amber-200"><?php echo $h($t('แก้ Manual Review', 'Resolve manual review')); ?></summary>
+                                        <div class="mt-3 space-y-3">
+                                            <div class="text-xs text-gray-400"><?php echo $h($t('ตรวจสอบบัญชี Supplier ด้วยตนเองก่อน ถ้าพบว่าซื้อสำเร็จให้ใส่ Key ครบตามจำนวน ห้ามเดาค่า', 'Verify the supplier account manually first. If the purchase succeeded, enter exactly the delivered key count. Do not guess.')); ?></div>
+                                            <form method="post" class="space-y-2">
+                                                <?php echo csrfField(); ?><input type="hidden" name="action" value="manual_confirm_supplier_order"><input type="hidden" name="order_id" value="<?php echo (int) $order['id']; ?>">
+                                                <textarea class="field font-mono text-xs" name="manual_keys" rows="3" required placeholder="1 key per line"></textarea>
+                                                <button class="btn btn-primary !py-2" type="submit"><i class="bi bi-key"></i><?php echo $h($t('ยืนยันสำเร็จและส่ง Key', 'Confirm success and deliver')); ?></button>
+                                            </form>
+                                            <form method="post" class="space-y-2" onsubmit="return confirm('<?php echo $h($t('ยืนยันว่าตรวจ Supplier แล้วและไม่มีออเดอร์จริง? การคืนยอดผิดจะทำให้ลูกค้าได้เงินคืนทั้งที่ Supplier อาจส่ง Key แล้ว', 'Confirm that the supplier was checked and no order exists? A wrong refund can return funds even if the supplier already delivered a key.')); ?>')">
+                                                <?php echo csrfField(); ?><input type="hidden" name="action" value="manual_refund_supplier_order"><input type="hidden" name="order_id" value="<?php echo (int) $order['id']; ?>">
+                                                <label class="text-xs text-red-200"><input type="checkbox" name="confirmed_no_supplier_order" required class="mr-2"><?php echo $h($t('ฉันตรวจแล้วว่า Supplier ไม่ได้สร้างออเดอร์', 'I verified that the supplier did not create the order')); ?></label>
+                                                <button class="btn btn-danger !py-2" type="submit"><i class="bi bi-arrow-counterclockwise"></i><?php echo $h($t('คืนยอดแบบ Manual', 'Manual refund')); ?></button>
+                                            </form>
+                                        </div>
+                                    </details>
+                                <?php elseif (in_array((string) $order['status'], ['unknown','processing','manual_review','submitting'], true)): ?>
+                                    <form method="post"><?php echo csrfField(); ?><input type="hidden" name="action" value="reconcile_order"><input type="hidden" name="order_id" value="<?php echo (int) $order['id']; ?>"><button class="btn btn-soft !py-2" type="submit"><i class="bi bi-search"></i><?php echo $h($t('ตรวจสอบ', 'Reconcile')); ?></button></form>
+                                <?php endif; ?>
+                            </td>
+                        </tr>
+                    <?php endforeach; ?>
+                    <?php if ($supplierOrders === []): ?><tr><td colspan="6" class="p-6 text-center text-gray-500"><?php echo $h($t('ยังไม่มีคำสั่งซื้อ', 'No orders yet.')); ?></td></tr><?php endif; ?>
+                    </tbody>
+                </table>
+            </div>
         </div>
     </section>
 
@@ -1280,8 +1380,8 @@ $storeBridgeKeyInfo = storeBridgeEncryptionKeyInfo();
     <section class="rounded-xl border border-amber-500/25 bg-amber-900/10 p-5 text-sm text-amber-100 leading-relaxed">
         <div class="font-bold mb-2"><i class="bi bi-shield-check mr-2"></i><?php echo $h($t('ข้อควรรู้ก่อนใช้งานจริง', 'Before production use')); ?></div>
         <p><?php echo $h($t(
-            'Provider Store API ใช้ Local ก่อน และ fallback ไป CGO อัตโนมัติเมื่อ Local ไม่พอทั้ง Order และ Variant นั้นเชื่อม CGO ไว้ โดยไม่บวกสต็อก Local+CGO และไม่ผสมคีย์สองแหล่งใน Order เดียว การหักเงินเกิดที่ Store API เพียงครั้งเดียว ส่วน CGO ทำหน้าที่ procurement เท่านั้น หากสถานะ upstream ยังไม่แน่นอน Order จะค้าง processing เพื่อ reconcile ผ่าน order_status แทนการยิงซื้อซ้ำ',
-            'The provider Store API is local-first and automatically falls back to CGO when local stock cannot fulfill the complete order and the variant has an eligible CGO link. Local and CGO stock are not summed and one order never mixes the two sources. Store API billing is charged once while CGO acts only as procurement. Ambiguous upstream states remain processing and are reconciled through order_status instead of submitting a duplicate purchase.'
+            'Provider Store API ใช้ Local ก่อน จากนั้นใช้ CGO และ Store Bridge Supplier เฉพาะแหล่งที่ Admin อนุญาตให้ API Client นั้น โดยไม่บวกสต็อกหลายแหล่งและไม่ผสมคีย์หลายแหล่งใน Order เดียว การหักเงินเกิดที่ Store API parent เพียงครั้งเดียว ส่วน CGO/VIPSTORE/StarkMods ทำหน้าที่ procurement เท่านั้น หากสถานะ upstream ยังไม่แน่นอน Order จะค้าง processing/manual review และห้ามยิงซื้อซ้ำ',
+            'The provider Store API is LOCAL-first, then uses only CGO and Store Bridge supplier connections explicitly allowed for that API client. Independent stock pools are never summed and one order never mixes sources. Store API parent billing is charged once while CGO/VIPSTORE/StarkMods act only as procurement. Ambiguous upstream states remain processing/manual review and must not be resubmitted.'
         )); ?></p>
     </section>
 </main>

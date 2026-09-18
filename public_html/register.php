@@ -16,7 +16,13 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
     // Public registration is rate-limited per client IP. Only the normal user
     // role can be created from this page; reseller/admin accounts remain under
     // administrator control.
-    if (!checkRateLimit('public_registration', 5, 3600)) {
+    $submittedEmail = isset($_POST['email']) && is_scalar($_POST['email']) ? trim((string) $_POST['email']) : '';
+    $accessBlock = accountVerificationPreAuthBlock($submittedEmail);
+    if (!empty($accessBlock['blocked'])) {
+        $error = getAppLang() === 'en'
+            ? 'Registration from this email, device, or network has been blocked.'
+            : 'อีเมล อุปกรณ์ หรือเครือข่ายนี้ถูกระงับการสมัครบัญชี';
+    } elseif (!checkRateLimit('public_registration', 5, 3600)) {
         $remaining = getRateLimitReset('public_registration', 3600);
         $error = Lang::t('register.error.rate_limit', ['minutes' => max(1, (int) ceil($remaining / 60))]);
     } else {

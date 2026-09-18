@@ -1,0 +1,125 @@
+name: FTP Pre-Deploy Backup
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/ftp-predeploy-backup.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  backup-ftp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      FTP_HOST: svth01.inwcloud.shop
+      FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
+      FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+      FTP_REMOTE_DIR: public_html
+
+    steps:
+      - name: Validate FTP configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in FTP_HOST FTP_USERNAME FTP_PASSWORD FTP_REMOTE_DIR; do
+            if [ -z "${!name:-}" ]; then
+              echo "Missing required FTP setting: $name"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+          echo "FTP configuration is present."
+
+      - name: Install lftp
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq lftp
+
+      - name: Download deploy-managed files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p backup/site
+
+          cat > /tmp/lftp-backup.conf <<'EOF'
+          set cmd:fail-exit true
+          set net:max-retries 1
+          set net:timeout 30
+          set ftp:passive-mode true
+          set ssl:verify-certificate true
+          EOF
+
+          lftp -f /tmp/lftp-backup.conf -c "open -u \"$FTP_USERNAME\",\"$FTP_PASSWORD\" ftp://$FTP_HOST; cd \"$FTP_REMOTE_DIR\"; mirror --parallel=4 --exclude-glob \"includes/db.php\" --exclude-glob \"assets/uploads/**\" --exclude-glob \"includes/exchange_rate_cache.json\" --exclude-glob \".env\" --exclude-glob \"*.env\" . backup/site"
+
+          test ! -e backup/site/includes/db.php
+          test ! -e backup/site/.env
+          test ! -e backup/site/includes/exchange_rate_cache.json
+
+          if [ -d backup/site/assets/uploads ]; then
+            if find backup/site/assets/uploads -type f -print -quit | grep -q .; then
+              echo "Excluded runtime uploads unexpectedly contain files in backup."
+              exit 1
+            fi
+          fi
+
+          file_count=$(find backup/site -type f | wc -l | tr -d ' ')
+          dir_count=$(find backup/site -type d | wc -l | tr -d ' ')
+          total_bytes=$(du -sb backup/site | awk '{print $1}')
+
+          printf 'FTP host: %s\nRemote directory: %s\nGenerated (UTC): %s\nFiles: %s\nDirectories: %s\nBytes: %s\n' \
+            "$FTP_HOST" "$FTP_REMOTE_DIR" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+            "$file_count" "$dir_count" "$total_bytes" > backup/summary.txt
+
+          printf '%s\n' \
+            'Excluded from backup:' \
+            '- includes/db.php (production database credentials/config)' \
+            '- assets/uploads/** (runtime/user-generated files)' \
+            '- includes/exchange_rate_cache.json (runtime cache)' \
+            '- .env and *.env (environment secrets)' \
+            >> backup/summary.txt
+
+          echo "Backup source downloaded successfully."
+          cat backup/summary.txt
+
+      - name: Build archive and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          find backup/site -type f -print0 \
+            | sort -z \
+            | xargs -0 sha256sum > backup/sha256sums.txt
+
+          tar -C backup/site -czf backup/public_html-predeploy.tar.gz .
+
+          if tar -tzf backup/public_html-predeploy.tar.gz | grep -Eq '(^|/)includes/db\.php$|(^|/)\.env$|(^|/)assets/uploads/.+'; then
+            echo "Sensitive or runtime-only files were found in the backup archive."
+            exit 1
+          fi
+
+          sha256sum backup/public_html-predeploy.tar.gz > backup/archive.sha256
+          echo "Archive and checksums created successfully."
+          cat backup/archive.sha256
+
+      - name: Upload backup artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ftp-predeploy-backup-${{ github.run_id }}
+          path: |
+            backup/public_html-predeploy.tar.gz
+            backup/archive.sha256
+            backup/sha256sums.txt
+            backup/summary.txt
+          if-no-files-found: error
+          retention-days: 14

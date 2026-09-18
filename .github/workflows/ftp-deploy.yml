@@ -2,11 +2,6 @@ name: FTP Deploy
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/ftp-deploy.yml"
 
 permissions:
   contents: read

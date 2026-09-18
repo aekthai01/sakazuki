@@ -1,0 +1,125 @@
+name: FTP Deploy
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/ftp-deploy.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      FTP_HOST: svth01.inwcloud.shop
+      FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
+      FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+      FTP_REMOTE_DIR: public_html
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate deploy source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for name in FTP_HOST FTP_USERNAME FTP_PASSWORD FTP_REMOTE_DIR; do
+            if [ -z "${!name:-}" ]; then
+              echo "Missing required FTP setting: $name"
+              exit 1
+            fi
+          done
+
+          test -d public_html
+
+          blocked=(
+            "public_html/includes/db.php"
+            "public_html/includes/exchange_rate_cache.json"
+            "public_html/.env"
+          )
+
+          for path in "${blocked[@]}"; do
+            if [ -e "$path" ]; then
+              echo "Blocked deploy source exists in repository checkout: $path"
+              exit 1
+            fi
+          done
+
+          if find public_html -type f -name '*.env' -print -quit | grep -q .; then
+            echo "Blocked *.env file exists in deploy source."
+            exit 1
+          fi
+
+          if [ -d public_html/assets/uploads ] && find public_html/assets/uploads -type f -print -quit | grep -q .; then
+            echo "Runtime upload files are tracked in deploy source."
+            exit 1
+          fi
+
+          echo "Deploy source validation passed."
+
+      - name: PHP syntax check
+        shell: bash
+        run: |
+          set -euo pipefail
+          failures=0
+          count=0
+
+          while IFS= read -r -d '' file; do
+            count=$((count + 1))
+            if ! php -l "$file" >/tmp/php-lint.out 2>&1; then
+              cat /tmp/php-lint.out
+              failures=$((failures + 1))
+            fi
+          done < <(find public_html -type f -name '*.php' -print0)
+
+          echo "PHP files checked: $count"
+          if [ "$failures" -ne 0 ]; then
+            echo "PHP syntax failures: $failures"
+            exit 1
+          fi
+
+      - name: Install lftp
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq lftp
+
+      - name: Build FTP deploy plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p deploy-plan
+
+          cat > /tmp/lftp-deploy.conf <<'EOF'
+          set cmd:fail-exit true
+          set net:max-retries 1
+          set net:timeout 30
+          set ftp:passive-mode true
+          set ssl:verify-certificate true
+          EOF
+
+          lftp -f /tmp/lftp-deploy.conf -c "open -u \"$FTP_USERNAME\",\"$FTP_PASSWORD\" ftp://$FTP_HOST; cd \"$FTP_REMOTE_DIR\"; mirror --reverse --dry-run --verbose --parallel=4 --no-perms --exclude-glob \"includes/db.php\" --exclude-glob \"includes/exchange_rate_cache.json\" --exclude-glob \"assets/uploads/**\" --exclude-glob \".env\" --exclude-glob \"*.env\" public_html ." \
+            | tee deploy-plan/ftp-deploy-plan.txt
+
+          printf 'Source: public_html\nFTP host: %s\nRemote directory: %s\nCommit: %s\nGenerated (UTC): %s\nMode: dry-run\nDelete remote files: no\n' \
+            "$FTP_HOST" "$FTP_REMOTE_DIR" "$GITHUB_SHA" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+            > deploy-plan/summary.txt
+
+          echo "FTP deploy dry-run completed successfully."
+
+      - name: Upload deploy plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: ftp-deploy-plan-${{ github.run_id }}
+          path: deploy-plan/
+          if-no-files-found: error
+          retention-days: 7

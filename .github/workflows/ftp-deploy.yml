@@ -39,6 +39,7 @@ jobs:
           done
 
           test -d public_html
+          test -f public_html/includes/db.php
 
           if [ -e public_html/includes/exchange_rate_cache.json ]; then
             echo "Runtime cache must not be tracked in deploy source."
@@ -51,11 +52,20 @@ jobs:
           fi
 
           if [ -d public_html/assets/uploads ]; then
-            unexpected=$(find public_html/assets/uploads -type f ! -path 'public_html/assets/uploads/.htaccess' -print -quit)
-            if [ -n "$unexpected" ]; then
-              echo "Runtime upload file is tracked in deploy source: $unexpected"
-              exit 1
-            fi
+            while IFS= read -r file; do
+              case "$file" in
+                public_html/assets/uploads/.htaccess|\
+                public_html/assets/uploads/icons/.htaccess|\
+                public_html/assets/uploads/icons/index.php|\
+                public_html/assets/uploads/products/.htaccess|\
+                public_html/assets/uploads/products/index.php)
+                  ;;
+                *)
+                  echo "Runtime/unexpected upload file is tracked in deploy source: $file"
+                  exit 1
+                  ;;
+              esac
+            done < <(find public_html/assets/uploads -type f -print)
           fi
 
           echo "Deploy source validation passed."
@@ -91,19 +101,14 @@ jobs:
           rm -f deploy-source/includes/exchange_rate_cache.json
           find deploy-source -type f -name '*.env' -delete
 
-          if [ -d deploy-source/assets/uploads ]; then
-            upload_rules=''
-            if [ -f deploy-source/assets/uploads/.htaccess ]; then
-              upload_rules=$(mktemp)
-              cp deploy-source/assets/uploads/.htaccess "$upload_rules"
-            fi
-            rm -rf deploy-source/assets/uploads
-            if [ -n "$upload_rules" ]; then
-              mkdir -p deploy-source/assets/uploads
-              cp "$upload_rules" deploy-source/assets/uploads/.htaccess
-              rm -f "$upload_rules"
-            fi
-          fi
+          rm -rf deploy-source/assets/uploads
+          mkdir -p deploy-source/assets/uploads/icons deploy-source/assets/uploads/products
+
+          cp public_html/assets/uploads/.htaccess deploy-source/assets/uploads/.htaccess
+          cp public_html/assets/uploads/icons/.htaccess deploy-source/assets/uploads/icons/.htaccess
+          cp public_html/assets/uploads/icons/index.php deploy-source/assets/uploads/icons/index.php
+          cp public_html/assets/uploads/products/.htaccess deploy-source/assets/uploads/products/.htaccess
+          cp public_html/assets/uploads/products/index.php deploy-source/assets/uploads/products/index.php
 
           test -f deploy-source/includes/db.php
           echo "Deploy staging directory created."

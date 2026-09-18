@@ -40,27 +40,22 @@ jobs:
 
           test -d public_html
 
-          blocked=(
-            "public_html/includes/db.php"
-            "public_html/includes/exchange_rate_cache.json"
-            "public_html/.env"
-          )
-
-          for path in "${blocked[@]}"; do
-            if [ -e "$path" ]; then
-              echo "Blocked deploy source exists in repository checkout: $path"
-              exit 1
-            fi
-          done
+          if [ -e public_html/includes/exchange_rate_cache.json ]; then
+            echo "Runtime cache must not be tracked in deploy source."
+            exit 1
+          fi
 
           if find public_html -type f -name '*.env' -print -quit | grep -q .; then
             echo "Blocked *.env file exists in deploy source."
             exit 1
           fi
 
-          if [ -d public_html/assets/uploads ] && find public_html/assets/uploads -type f -print -quit | grep -q .; then
-            echo "Runtime upload files are tracked in deploy source."
-            exit 1
+          if [ -d public_html/assets/uploads ]; then
+            unexpected=$(find public_html/assets/uploads -type f ! -path 'public_html/assets/uploads/.htaccess' -print -quit)
+            if [ -n "$unexpected" ]; then
+              echo "Runtime upload file is tracked in deploy source: $unexpected"
+              exit 1
+            fi
           fi
 
           echo "Deploy source validation passed."
@@ -86,6 +81,34 @@ jobs:
             exit 1
           fi
 
+      - name: Build deploy staging directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf deploy-source
+          cp -a public_html deploy-source
+
+          rm -f deploy-source/includes/exchange_rate_cache.json
+          find deploy-source -type f -name '*.env' -delete
+
+          if [ -d deploy-source/assets/uploads ]; then
+            upload_rules=''
+            if [ -f deploy-source/assets/uploads/.htaccess ]; then
+              upload_rules=$(mktemp)
+              cp deploy-source/assets/uploads/.htaccess "$upload_rules"
+            fi
+            rm -rf deploy-source/assets/uploads
+            if [ -n "$upload_rules" ]; then
+              mkdir -p deploy-source/assets/uploads
+              cp "$upload_rules" deploy-source/assets/uploads/.htaccess
+              rm -f "$upload_rules"
+            fi
+          fi
+
+          test -f deploy-source/includes/db.php
+          echo "Deploy staging directory created."
+          echo "Staged files: $(find deploy-source -type f | wc -l | tr -d ' ')"
+
       - name: Install lftp
         shell: bash
         run: |
@@ -107,10 +130,10 @@ jobs:
           set ssl:verify-certificate true
           EOF
 
-          lftp -f /tmp/lftp-deploy.conf -c "open -u \"$FTP_USERNAME\",\"$FTP_PASSWORD\" ftp://$FTP_HOST; cd \"$FTP_REMOTE_DIR\"; mirror --reverse --dry-run --verbose --parallel=4 --no-perms --exclude-glob \"includes/db.php\" --exclude-glob \"includes/exchange_rate_cache.json\" --exclude-glob \"assets/uploads/**\" --exclude-glob \".env\" --exclude-glob \"*.env\" public_html ." \
+          lftp -f /tmp/lftp-deploy.conf -c "open -u \"$FTP_USERNAME\",\"$FTP_PASSWORD\" ftp://$FTP_HOST; cd \"$FTP_REMOTE_DIR\"; mirror --reverse --dry-run --verbose --parallel=4 --no-perms deploy-source ." \
             | tee deploy-plan/ftp-deploy-plan.txt
 
-          printf 'Source: public_html\nFTP host: %s\nRemote directory: %s\nCommit: %s\nGenerated (UTC): %s\nMode: dry-run\nDelete remote files: no\n' \
+          printf 'Source: deploy-source\nFTP host: %s\nRemote directory: %s\nCommit: %s\nGenerated (UTC): %s\nMode: dry-run\nDelete remote files: no\n' \
             "$FTP_HOST" "$FTP_REMOTE_DIR" "$GITHUB_SHA" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
             > deploy-plan/summary.txt
 

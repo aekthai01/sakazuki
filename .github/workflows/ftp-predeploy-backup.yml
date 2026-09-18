@@ -62,19 +62,32 @@ jobs:
 
           lftp -f /tmp/lftp-backup.conf -c "open -u \"$FTP_USERNAME\",\"$FTP_PASSWORD\" ftp://$FTP_HOST; cd \"$FTP_REMOTE_DIR\"; mirror --parallel=4 --exclude-glob \"assets/uploads/**\" --exclude-glob \"includes/exchange_rate_cache.json\" --exclude-glob \".env\" --exclude-glob \"*.env\" . backup/site"
 
-          mkdir -p backup/site/assets/uploads
-          lftp -f /tmp/lftp-backup.conf -c "open -u \"$FTP_USERNAME\",\"$FTP_PASSWORD\" ftp://$FTP_HOST; cd \"$FTP_REMOTE_DIR\"; get \"assets/uploads/.htaccess\" -o \"backup/site/assets/uploads/.htaccess\""
+          mkdir -p backup/site/assets/uploads/icons backup/site/assets/uploads/products
+          lftp -f /tmp/lftp-backup.conf -c "open -u \"$FTP_USERNAME\",\"$FTP_PASSWORD\" ftp://$FTP_HOST; cd \"$FTP_REMOTE_DIR\"; get \"assets/uploads/.htaccess\" -o \"backup/site/assets/uploads/.htaccess\"; get \"assets/uploads/icons/.htaccess\" -o \"backup/site/assets/uploads/icons/.htaccess\"; get \"assets/uploads/icons/index.php\" -o \"backup/site/assets/uploads/icons/index.php\"; get \"assets/uploads/products/.htaccess\" -o \"backup/site/assets/uploads/products/.htaccess\"; get \"assets/uploads/products/index.php\" -o \"backup/site/assets/uploads/products/index.php\""
 
           test -f backup/site/includes/db.php
           test -f backup/site/assets/uploads/.htaccess
+          test -f backup/site/assets/uploads/icons/.htaccess
+          test -f backup/site/assets/uploads/icons/index.php
+          test -f backup/site/assets/uploads/products/.htaccess
+          test -f backup/site/assets/uploads/products/index.php
           test ! -e backup/site/.env
           test ! -e backup/site/includes/exchange_rate_cache.json
 
-          unexpected_upload=$(find backup/site/assets/uploads -type f ! -path 'backup/site/assets/uploads/.htaccess' -print -quit)
-          if [ -n "$unexpected_upload" ]; then
-            echo "Runtime upload unexpectedly entered backup: $unexpected_upload"
-            exit 1
-          fi
+          while IFS= read -r file; do
+            case "$file" in
+              backup/site/assets/uploads/.htaccess|\
+              backup/site/assets/uploads/icons/.htaccess|\
+              backup/site/assets/uploads/icons/index.php|\
+              backup/site/assets/uploads/products/.htaccess|\
+              backup/site/assets/uploads/products/index.php)
+                ;;
+              *)
+                echo "Runtime upload unexpectedly entered backup: $file"
+                exit 1
+                ;;
+            esac
+          done < <(find backup/site/assets/uploads -type f -print)
 
           file_count=$(find backup/site -type f | wc -l | tr -d ' ')
           dir_count=$(find backup/site -type d | wc -l | tr -d ' ')
@@ -86,9 +99,15 @@ jobs:
 
           printf '%s\n' \
             'Included application config loader:' \
-            '- includes/db.php (contains no production DB credential; loads private config/environment)' \
+            '- includes/db.php (loads private config/environment; no production credential embedded)' \
+            'Included upload-directory guard files only:' \
+            '- assets/uploads/.htaccess' \
+            '- assets/uploads/icons/.htaccess' \
+            '- assets/uploads/icons/index.php' \
+            '- assets/uploads/products/.htaccess' \
+            '- assets/uploads/products/index.php' \
             'Excluded from backup:' \
-            '- assets/uploads/** except assets/uploads/.htaccess (runtime/user-generated files)' \
+            '- all other assets/uploads/** runtime/user-generated files' \
             '- includes/exchange_rate_cache.json (runtime cache)' \
             '- .env and *.env (environment secrets)' \
             >> backup/summary.txt
@@ -116,14 +135,6 @@ jobs:
             exit 1
           fi
 
-          upload_entries=$(tar -tzf backup/public_html-predeploy.tar.gz | grep '^\./assets/uploads/' || true)
-          unexpected_upload_entries=$(printf '%s\n' "$upload_entries" | grep -v '^\./assets/uploads/$' | grep -v '^\./assets/uploads/\.htaccess$' || true)
-          if [ -n "$unexpected_upload_entries" ]; then
-            echo "Unexpected runtime upload content found in archive:"
-            printf '%s\n' "$unexpected_upload_entries"
-            exit 1
-          fi
-
           (
             cd backup
             sha256sum public_html-predeploy.tar.gz > archive.sha256
@@ -140,6 +151,10 @@ jobs:
 
           test -f /tmp/ftp-backup-verify/includes/db.php
           test -f /tmp/ftp-backup-verify/assets/uploads/.htaccess
+          test -f /tmp/ftp-backup-verify/assets/uploads/icons/.htaccess
+          test -f /tmp/ftp-backup-verify/assets/uploads/icons/index.php
+          test -f /tmp/ftp-backup-verify/assets/uploads/products/.htaccess
+          test -f /tmp/ftp-backup-verify/assets/uploads/products/index.php
 
           echo "Archive and portable checksums verified successfully."
           cat backup/archive.sha256

@@ -92,24 +92,41 @@ jobs:
           echo "Backup source downloaded successfully."
           cat backup/summary.txt
 
-      - name: Build archive and checksums
+      - name: Build and verify archive
         shell: bash
         run: |
           set -euo pipefail
 
-          find backup/site -type f -print0 \
-            | sort -z \
-            | xargs -0 sha256sum > backup/sha256sums.txt
+          (
+            cd backup/site
+            find . -type f -print0 \
+              | sort -z \
+              | xargs -0 sha256sum
+          ) > backup/sha256sums.txt
 
           tar -C backup/site -czf backup/public_html-predeploy.tar.gz .
 
-          if tar -tzf backup/public_html-predeploy.tar.gz | grep -Eq '(^|/)includes/db\.php$|(^|/)\.env$|(^|/)assets/uploads/.+'; then
+          if tar -tzf backup/public_html-predeploy.tar.gz \
+            | grep -Eq '(^|/)includes/db\.php$|(^|/)[^/]*\.env$|(^|/)assets/uploads/.+|(^|/)includes/exchange_rate_cache\.json$'; then
             echo "Sensitive or runtime-only files were found in the backup archive."
             exit 1
           fi
 
-          sha256sum backup/public_html-predeploy.tar.gz > backup/archive.sha256
-          echo "Archive and checksums created successfully."
+          (
+            cd backup
+            sha256sum public_html-predeploy.tar.gz > archive.sha256
+            sha256sum -c archive.sha256
+          )
+
+          rm -rf /tmp/ftp-backup-verify
+          mkdir -p /tmp/ftp-backup-verify
+          tar -xzf backup/public_html-predeploy.tar.gz -C /tmp/ftp-backup-verify
+          (
+            cd /tmp/ftp-backup-verify
+            sha256sum -c "$GITHUB_WORKSPACE/backup/sha256sums.txt" >/dev/null
+          )
+
+          echo "Archive and portable checksums verified successfully."
           cat backup/archive.sha256
 
       - name: Upload backup artifact

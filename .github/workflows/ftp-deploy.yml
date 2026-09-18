@@ -121,11 +121,11 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq lftp
 
-      - name: Build FTP deploy plan
+      - name: Deploy to production FTP
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p deploy-plan
+          mkdir -p deploy-result
 
           cat > /tmp/lftp-deploy.conf <<'EOF'
           set cmd:fail-exit true
@@ -135,19 +135,41 @@ jobs:
           set ssl:verify-certificate true
           EOF
 
-          lftp -f /tmp/lftp-deploy.conf -c "open -u \"$FTP_USERNAME\",\"$FTP_PASSWORD\" ftp://$FTP_HOST; cd \"$FTP_REMOTE_DIR\"; mirror --reverse --dry-run --verbose --parallel=4 --no-perms deploy-source ." \
-            | tee deploy-plan/ftp-deploy-plan.txt
+          lftp -f /tmp/lftp-deploy.conf -c "open -u \"$FTP_USERNAME\",\"$FTP_PASSWORD\" ftp://$FTP_HOST; cd \"$FTP_REMOTE_DIR\"; mirror --reverse --verbose --parallel=4 --no-perms deploy-source ." \
+            | tee deploy-result/ftp-deploy.log
 
-          printf 'Source: deploy-source\nFTP host: %s\nRemote directory: %s\nCommit: %s\nGenerated (UTC): %s\nMode: dry-run\nDelete remote files: no\n' \
+          printf 'Source: deploy-source\nFTP host: %s\nRemote directory: %s\nCommit: %s\nDeployed (UTC): %s\nDelete remote files: no\nStaged files: %s\n' \
             "$FTP_HOST" "$FTP_REMOTE_DIR" "$GITHUB_SHA" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
-            > deploy-plan/summary.txt
+            "$(find deploy-source -type f | wc -l | tr -d ' ')" \
+            > deploy-result/summary.txt
 
-          echo "FTP deploy dry-run completed successfully."
+          echo "FTP production deploy completed successfully."
 
-      - name: Upload deploy plan
+      - name: Verify FTP remains accessible
+        shell: bash
+        run: |
+          set -euo pipefail
+          host="${FTP_HOST#ftp://}"
+          host="${host#ftps://}"
+          host="${host%/}"
+
+          curl \
+            --silent \
+            --show-error \
+            --fail \
+            --connect-timeout 15 \
+            --max-time 45 \
+            --user "$FTP_USERNAME:$FTP_PASSWORD" \
+            --list-only \
+            "ftp://$host/$FTP_REMOTE_DIR/" \
+            >/dev/null
+
+          echo "FTP post-deploy access check passed."
+
+      - name: Upload deploy result
         uses: actions/upload-artifact@v4
         with:
-          name: ftp-deploy-plan-${{ github.run_id }}
-          path: deploy-plan/
+          name: ftp-deploy-result-${{ github.run_id }}
+          path: deploy-result/
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 14

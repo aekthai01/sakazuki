@@ -60,17 +60,20 @@ jobs:
           set ssl:verify-certificate true
           EOF
 
-          lftp -f /tmp/lftp-backup.conf -c "open -u \"$FTP_USERNAME\",\"$FTP_PASSWORD\" ftp://$FTP_HOST; cd \"$FTP_REMOTE_DIR\"; mirror --parallel=4 --exclude-glob \"includes/db.php\" --exclude-glob \"assets/uploads/**\" --exclude-glob \"includes/exchange_rate_cache.json\" --exclude-glob \".env\" --exclude-glob \"*.env\" . backup/site"
+          lftp -f /tmp/lftp-backup.conf -c "open -u \"$FTP_USERNAME\",\"$FTP_PASSWORD\" ftp://$FTP_HOST; cd \"$FTP_REMOTE_DIR\"; mirror --parallel=4 --exclude-glob \"assets/uploads/**\" --exclude-glob \"includes/exchange_rate_cache.json\" --exclude-glob \".env\" --exclude-glob \"*.env\" . backup/site"
 
-          test ! -e backup/site/includes/db.php
+          mkdir -p backup/site/assets/uploads
+          lftp -f /tmp/lftp-backup.conf -c "open -u \"$FTP_USERNAME\",\"$FTP_PASSWORD\" ftp://$FTP_HOST; cd \"$FTP_REMOTE_DIR\"; get \"assets/uploads/.htaccess\" -o \"backup/site/assets/uploads/.htaccess\""
+
+          test -f backup/site/includes/db.php
+          test -f backup/site/assets/uploads/.htaccess
           test ! -e backup/site/.env
           test ! -e backup/site/includes/exchange_rate_cache.json
 
-          if [ -d backup/site/assets/uploads ]; then
-            if find backup/site/assets/uploads -type f -print -quit | grep -q .; then
-              echo "Excluded runtime uploads unexpectedly contain files in backup."
-              exit 1
-            fi
+          unexpected_upload=$(find backup/site/assets/uploads -type f ! -path 'backup/site/assets/uploads/.htaccess' -print -quit)
+          if [ -n "$unexpected_upload" ]; then
+            echo "Runtime upload unexpectedly entered backup: $unexpected_upload"
+            exit 1
           fi
 
           file_count=$(find backup/site -type f | wc -l | tr -d ' ')
@@ -82,9 +85,10 @@ jobs:
             "$file_count" "$dir_count" "$total_bytes" > backup/summary.txt
 
           printf '%s\n' \
+            'Included application config loader:' \
+            '- includes/db.php (contains no production DB credential; loads private config/environment)' \
             'Excluded from backup:' \
-            '- includes/db.php (production database credentials/config)' \
-            '- assets/uploads/** (runtime/user-generated files)' \
+            '- assets/uploads/** except assets/uploads/.htaccess (runtime/user-generated files)' \
             '- includes/exchange_rate_cache.json (runtime cache)' \
             '- .env and *.env (environment secrets)' \
             >> backup/summary.txt
@@ -107,8 +111,16 @@ jobs:
           tar -C backup/site -czf backup/public_html-predeploy.tar.gz .
 
           if tar -tzf backup/public_html-predeploy.tar.gz \
-            | grep -Eq '(^|/)includes/db\.php$|(^|/)[^/]*\.env$|(^|/)assets/uploads/.+|(^|/)includes/exchange_rate_cache\.json$'; then
-            echo "Sensitive or runtime-only files were found in the backup archive."
+            | grep -Eq '(^|/)[^/]*\.env$|(^|/)includes/exchange_rate_cache\.json$'; then
+            echo "Sensitive or runtime-only file was found in the backup archive."
+            exit 1
+          fi
+
+          upload_entries=$(tar -tzf backup/public_html-predeploy.tar.gz | grep '^\./assets/uploads/' || true)
+          unexpected_upload_entries=$(printf '%s\n' "$upload_entries" | grep -v '^\./assets/uploads/$' | grep -v '^\./assets/uploads/\.htaccess$' || true)
+          if [ -n "$unexpected_upload_entries" ]; then
+            echo "Unexpected runtime upload content found in archive:"
+            printf '%s\n' "$unexpected_upload_entries"
             exit 1
           fi
 
@@ -125,6 +137,9 @@ jobs:
             cd /tmp/ftp-backup-verify
             sha256sum -c "$GITHUB_WORKSPACE/backup/sha256sums.txt" >/dev/null
           )
+
+          test -f /tmp/ftp-backup-verify/includes/db.php
+          test -f /tmp/ftp-backup-verify/assets/uploads/.htaccess
 
           echo "Archive and portable checksums verified successfully."
           cat backup/archive.sha256

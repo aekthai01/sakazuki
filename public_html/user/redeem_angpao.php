@@ -3,6 +3,7 @@ ob_start();
 require_once '../includes/auth.php';
 require_once '../includes/ranking.php';
 require_once '../includes/truemoney.php';
+require_once '../includes/truemoney_direct.php';
 
 requireLogin(true);
 requireActive();
@@ -15,6 +16,7 @@ requireCsrfToken();
 
 $userId = (int) ($_SESSION['user_id'] ?? 0);
 $tmDebug = trueMoneyDebugStart($userId);
+trueMoneyDirectInitializeDebug($tmDebug);
 if (!headers_sent()) {
     header('X-Sakazuki-Debug-Request-ID: ' . (string) $tmDebug['request_id']);
 }
@@ -72,10 +74,18 @@ $tmDebug['configuration'] = [
     'enabled' => true,
     'receiver_phone_masked' => trueMoneyDebugMaskedPhone($tmPhone),
     'receiver_phone_length' => strlen($tmPhone),
-    'provider' => trueMoneyProviderName(),
-    'provider_display_name' => trueMoneyProviderDisplayName(),
-    'provider_target' => trueMoneyDebugProviderUrlSummary((string) TM_API_URL),
-    'provider_authorization_configured' => trueMoneyProviderName() === 'legacy_vercel' && defined('TRUEMONEY_PROVIDER_TOKEN') && trim((string) TRUEMONEY_PROVIDER_TOKEN) !== '',
+    'provider' => trueMoneyDirectProviderName(),
+    'provider_display_name' => trueMoneyDirectProviderDisplayName(),
+    'provider_target' => [
+        'scheme' => 'https',
+        'host' => 'gift.truemoney.com',
+        'port' => 443,
+        'path' => '',
+        'query_present' => false,
+        'path_segment_count' => 0,
+        'sensitive_path_redacted' => false,
+    ],
+    'provider_authorization_configured' => false,
     'fee_rate' => (float) TM_FEE_RATE,
     'fee_cap_thb' => (float) TM_FEE_CAP_THB,
 ];
@@ -94,6 +104,25 @@ $voucherHash = hash('sha256', (string) $normalized['token']);
 $tmDebug['redemption']['voucher_fingerprint'] = substr($voucherHash, 0, 16);
 trueMoneyDebugEvent($tmDebug, 'voucher_validated', ['voucher_fingerprint' => substr($voucherHash, 0, 16)]);
 
+// A previous redeem POST may have reached TrueMoney even if its response was lost.
+// Reconcile it read-only before beginTrueMoneyRedemption() is allowed to reset the row.
+$reconciliation = trueMoneyDirectReconcileIndeterminate(
+    $voucherHash,
+    $userId,
+    (string) $normalized['url'],
+    $tmPhone,
+    $tmDebug
+);
+if (($reconciliation['state'] ?? 'none') === 'pending') {
+    trueMoneyDebugError($tmDebug, 'indeterminate_reconciliation_pending', 'provider_indeterminate_pending', (string) ($reconciliation['message'] ?? 'Previous redemption is still indeterminate'));
+    $debugRespond(
+        $tmDebug,
+        ['success' => false, 'message' => $reconciliation['message'] ?? 'รายการก่อนหน้ายังรอตรวจสอบสถานะ'],
+        'indeterminate_reconciliation_pending',
+        'provider_indeterminate_pending'
+    );
+}
+
 $reservation = beginTrueMoneyRedemption($voucherHash, $userId, $tmDebug);
 if (empty($reservation['success'])) {
     $code = $lastDebugErrorCode($tmDebug, 'reservation_failed');
@@ -110,26 +139,31 @@ if (($reservation['mode'] ?? '') === 'resume') {
     $amountThb = (float) $reservation['amount_thb'];
     trueMoneyDebugEvent($tmDebug, 'provider_call_skipped_resume_mode', ['stored_amount_thb' => $amountThb]);
 } else {
-    $providerResult = redeemAngpao($normalized['url'], $tmPhone, $tmDebug);
+    $providerResult = redeemAngpaoDirect((string) $normalized['url'], $tmPhone, $tmDebug);
     trueMoneyDebugPersist($tmDebug);
     if (empty($providerResult['success'])) {
-        markTrueMoneyRedemptionFailed(
-            $redemptionId,
-            $userId,
-            (string) ($providerResult['message'] ?? 'Provider rejected voucher'),
-            $tmDebug
-        );
-        $code = $lastDebugErrorCode($tmDebug, 'provider_failed');
+        $providerMessage = (string) ($providerResult['message'] ?? 'TrueMoney rejected voucher');
+        if (!empty($providerResult['indeterminate'])) {
+            trueMoneyDirectMarkIndeterminate($redemptionId, $userId, $providerMessage, $tmDebug);
+        } else {
+            markTrueMoneyRedemptionFailed(
+                $redemptionId,
+                $userId,
+                $providerMessage,
+                $tmDebug
+            );
+        }
+        $code = (string) ($providerResult['code'] ?? $lastDebugErrorCode($tmDebug, 'provider_failed'));
         $debugRespond(
             $tmDebug,
-            ['success' => false, 'message' => $providerResult['message'] ?? 'ไม่สามารถรับซองของขวัญได้'],
-            'provider_failed',
+            ['success' => false, 'message' => $providerMessage],
+            !empty($providerResult['indeterminate']) ? 'provider_indeterminate' : 'provider_failed',
             $code
         );
     }
     $amountThb = (float) $providerResult['amount'];
     if (!markTrueMoneyProviderConfirmed($redemptionId, $userId, $amountThb, $tmDebug)) {
-        trueMoneyDebugError($tmDebug, 'provider_confirmation_persist_failed', 'provider_confirmation_persist_failed', 'Provider accepted the voucher but local provider-confirmed state was not persisted');
+        trueMoneyDebugError($tmDebug, 'provider_confirmation_persist_failed', 'provider_confirmation_persist_failed', 'TrueMoney accepted the voucher but local provider-confirmed state was not persisted');
         $debugRespond(
             $tmDebug,
             ['success' => false, 'message' => 'รับซองสำเร็จ แต่ยังบันทึกสถานะไม่เสร็จ กรุณาส่งลิงก์เดิมอีกครั้ง'],
@@ -170,7 +204,7 @@ if ($appCurrency === 'USD') {
     trueMoneyDebugEvent($tmDebug, 'exchange_rate_lookup_started');
     $rate = getExchangeRateThbToUsd();
     if (!$rate || !is_finite((float) $rate) || (float) $rate <= 0) {
-        trueMoneyDebugError($tmDebug, 'exchange_rate_lookup_failed', 'exchange_rate_unavailable', 'Provider accepted the voucher but THB to USD exchange rate is unavailable');
+        trueMoneyDebugError($tmDebug, 'exchange_rate_lookup_failed', 'exchange_rate_unavailable', 'TrueMoney accepted the voucher but THB to USD exchange rate is unavailable');
         $debugRespond(
             $tmDebug,
             ['success' => false, 'message' => 'รับซองสำเร็จแล้ว แต่ยังดึงอัตราแลกเปลี่ยนไม่ได้ กรุณาส่งลิงก์เดิมอีกครั้ง'],

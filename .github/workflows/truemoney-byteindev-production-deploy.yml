@@ -1,0 +1,227 @@
+name: TrueMoney ByteInDev Production Deploy
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "public_html/includes/truemoney_byteindev.php"
+      - "public_html/user/redeem_angpao.php"
+      - "tests/truemoney_byteindev_test.php"
+      - ".github/workflows/truemoney-byteindev-production-deploy.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test-backup-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      FTP_HOST: svth01.inwcloud.shop
+      FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
+      FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+      FTP_REMOTE_DIR: public_html
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: curl, json, mbstring, mysqli
+          coverage: none
+
+      - name: Validate FTP configuration and deploy source
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in FTP_HOST FTP_USERNAME FTP_PASSWORD FTP_REMOTE_DIR; do
+            if [ -z "${!name:-}" ]; then
+              echo "Missing required FTP setting: $name"
+              exit 1
+            fi
+          done
+          test -d public_html
+          test -f public_html/includes/db.php
+          test -f public_html/includes/truemoney_byteindev.php
+          test -f public_html/user/redeem_angpao.php
+          test -f tests/truemoney_byteindev_test.php
+          if [ -e public_html/includes/exchange_rate_cache.json ]; then
+            echo "Runtime cache must not be tracked in deploy source."
+            exit 1
+          fi
+          if find public_html -type f -name '*.env' -print -quit | grep -q .; then
+            echo "Blocked *.env file exists in deploy source."
+            exit 1
+          fi
+
+      - name: Run TrueMoney regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          php -l public_html/includes/truemoney_byteindev.php
+          php -l public_html/user/redeem_angpao.php
+          php -l tests/truemoney_byteindev_test.php
+          php tests/truemoney_byteindev_test.php
+
+      - name: Lint all production PHP
+        shell: bash
+        run: |
+          set -euo pipefail
+          failures=0
+          count=0
+          while IFS= read -r -d '' file; do
+            count=$((count + 1))
+            if ! php -l "$file" >/tmp/php-lint.out 2>&1; then
+              cat /tmp/php-lint.out
+              failures=$((failures + 1))
+            fi
+          done < <(find public_html -type f -name '*.php' -print0)
+          echo "PHP files checked: $count"
+          test "$failures" -eq 0
+
+      - name: Live probe all TrueMoney backends
+        shell: bash
+        run: |
+          set -euo pipefail
+          providers=(
+            'https://truemoney-voucher-go.vercel.app'
+            'https://truemoney-voucher-nestjs.vercel.app'
+            'https://truemoney-voucher-fastapi.vercel.app'
+          )
+          fake_code='SAKAZUKI_PRODUCTION_DEPLOY_DO_NOT_REDEEM'
+          phone='0812345678'
+
+          for base in "${providers[@]}"; do
+            echo "Probing ${base}"
+            status_http="$(curl --silent --show-error --connect-timeout 10 --max-time 30 \
+              --output /tmp/tmn-status.out --write-out '%{http_code}' "${base}/status")"
+            if [ "$status_http" -lt 200 ] || [ "$status_http" -ge 300 ]; then
+              echo "Health probe failed for ${base}: HTTP ${status_http}"
+              exit 1
+            fi
+
+            redeem_http="$(curl --silent --show-error --connect-timeout 10 --max-time 40 \
+              --output /tmp/tmn-redeem.json --write-out '%{http_code}' \
+              "${base}/truemoney/${fake_code}/${phone}")"
+            if [ "$redeem_http" = '000' ] || [ "$redeem_http" -ge 500 ]; then
+              echo "Redeem probe failed for ${base}: HTTP ${redeem_http}"
+              exit 1
+            fi
+
+            python3 - <<'PY'
+          import json
+          from pathlib import Path
+          raw = Path('/tmp/tmn-redeem.json').read_text(errors='replace')
+          payload = json.loads(raw)
+          if not isinstance(payload, dict):
+              raise SystemExit('redeem probe response is not an object')
+          status = payload.get('status')
+          if isinstance(status, dict) and status.get('code') == 'SUCCESS':
+              raise SystemExit('synthetic voucher unexpectedly succeeded')
+          if not isinstance(status, dict) and 'code' not in payload:
+              raise SystemExit('unrecognized redeem probe contract')
+          print('Recognized fake-voucher response')
+          PY
+          done
+
+      - name: Install lftp
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq lftp
+
+      - name: Backup current production files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p backup/site backup/result
+
+          cat > /tmp/lftp-common.conf <<'EOF'
+          set cmd:fail-exit true
+          set net:max-retries 1
+          set net:timeout 30
+          set ftp:passive-mode true
+          set ssl:verify-certificate true
+          EOF
+
+          lftp -f /tmp/lftp-common.conf -c "open -u \"$FTP_USERNAME\",\"$FTP_PASSWORD\" ftp://$FTP_HOST; cd \"$FTP_REMOTE_DIR\"; mirror --parallel=4 --exclude-glob \"assets/uploads/**\" --exclude-glob \"includes/exchange_rate_cache.json\" --exclude-glob \".env\" --exclude-glob \"*.env\" . backup/site"
+
+          test -f backup/site/includes/db.php
+          (
+            cd backup/site
+            find . -type f -print0 | sort -z | xargs -0 sha256sum
+          ) > backup/result/sha256sums.txt
+          tar -C backup/site -czf backup/result/public_html-predeploy.tar.gz .
+          sha256sum backup/result/public_html-predeploy.tar.gz > backup/result/archive.sha256
+          sha256sum -c backup/result/archive.sha256
+          echo "Pre-deploy backup completed."
+
+      - name: Build deploy staging directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf deploy-source
+          cp -a public_html deploy-source
+          rm -f deploy-source/includes/exchange_rate_cache.json
+          find deploy-source -type f -name '*.env' -delete
+
+          rm -rf deploy-source/assets/uploads
+          mkdir -p deploy-source/assets/uploads/icons deploy-source/assets/uploads/products
+          cp public_html/assets/uploads/.htaccess deploy-source/assets/uploads/.htaccess
+          cp public_html/assets/uploads/icons/.htaccess deploy-source/assets/uploads/icons/.htaccess
+          cp public_html/assets/uploads/icons/index.php deploy-source/assets/uploads/icons/index.php
+          cp public_html/assets/uploads/products/.htaccess deploy-source/assets/uploads/products/.htaccess
+          cp public_html/assets/uploads/products/index.php deploy-source/assets/uploads/products/index.php
+
+          test -f deploy-source/includes/truemoney_byteindev.php
+          test -f deploy-source/user/redeem_angpao.php
+          echo "Staged files: $(find deploy-source -type f | wc -l | tr -d ' ')"
+
+      - name: Deploy tested source to production FTP
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p deploy-result
+          cat > /tmp/lftp-deploy.conf <<'EOF'
+          set cmd:fail-exit true
+          set net:max-retries 1
+          set net:timeout 30
+          set ftp:passive-mode true
+          set ssl:verify-certificate true
+          EOF
+
+          lftp -f /tmp/lftp-deploy.conf -c "open -u \"$FTP_USERNAME\",\"$FTP_PASSWORD\" ftp://$FTP_HOST; cd \"$FTP_REMOTE_DIR\"; mirror --reverse --verbose --parallel=4 --no-perms deploy-source ." \
+            | tee deploy-result/ftp-deploy.log
+
+          printf 'Commit: %s\nDeployed UTC: %s\nFTP host: %s\nRemote: %s\nDelete remote files: no\n' \
+            "$GITHUB_SHA" "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" "$FTP_HOST" "$FTP_REMOTE_DIR" \
+            > deploy-result/summary.txt
+
+      - name: Verify FTP remains accessible
+        shell: bash
+        run: |
+          set -euo pipefail
+          host="${FTP_HOST#ftp://}"
+          host="${host#ftps://}"
+          host="${host%/}"
+          curl --silent --show-error --fail --connect-timeout 15 --max-time 45 \
+            --user "$FTP_USERNAME:$FTP_PASSWORD" --list-only \
+            "ftp://$host/$FTP_REMOTE_DIR/" >/dev/null
+          echo "FTP post-deploy access check passed."
+
+      - name: Upload backup and deploy evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: truemoney-byteindev-production-${{ github.run_id }}
+          path: |
+            backup/result/
+            deploy-result/
+          if-no-files-found: warn
+          retention-days: 14

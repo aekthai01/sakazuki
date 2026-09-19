@@ -1,0 +1,103 @@
+name: TrueMoney ByteInDev Probe
+
+on:
+  push:
+    branches:
+      - upgrade/truemoney-byteindev-20260920
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: go
+            base_url: https://truemoney-voucher-go.vercel.app
+          - name: nestjs
+            base_url: https://truemoney-voucher-nestjs.vercel.app
+          - name: fastapi
+            base_url: https://truemoney-voucher-fastapi.vercel.app
+
+    steps:
+      - name: Probe health and fake voucher
+        shell: bash
+        env:
+          PROVIDER_NAME: ${{ matrix.name }}
+          BASE_URL: ${{ matrix.base_url }}
+        run: |
+          set -euo pipefail
+
+          echo "Provider: ${PROVIDER_NAME}"
+          echo "Base URL: ${BASE_URL}"
+
+          status_code="$(curl --silent --show-error --connect-timeout 10 --max-time 30 \
+            --output /tmp/status.out \
+            --write-out '%{http_code}' \
+            "${BASE_URL}/status")"
+          echo "Status HTTP: ${status_code}"
+          if [ "${status_code}" = "000" ] || [ "${status_code}" -lt 200 ] || [ "${status_code}" -ge 300 ]; then
+            echo "Health endpoint failed"
+            cat /tmp/status.out || true
+            exit 1
+          fi
+
+          fake_code='SAKAZUKI_CI_DO_NOT_REDEEM_20260920'
+          phone='0812345678'
+          redeem_code="$(curl --silent --show-error --connect-timeout 10 --max-time 40 \
+            --output /tmp/redeem.json \
+            --write-out '%{http_code}' \
+            "${BASE_URL}/truemoney/${fake_code}/${phone}")"
+          echo "Redeem HTTP: ${redeem_code}"
+
+          if [ "${redeem_code}" = "000" ] || [ "${redeem_code}" -ge 500 ]; then
+            echo "Redeem endpoint unavailable"
+            cat /tmp/redeem.json || true
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          raw = Path('/tmp/redeem.json').read_text(errors='replace')
+          try:
+              payload = json.loads(raw)
+          except Exception as exc:
+              raise SystemExit(f'Redeem response is not JSON: {type(exc).__name__}: {raw[:300]}')
+
+          if not isinstance(payload, dict):
+              raise SystemExit('Redeem response is not a JSON object')
+
+          safe = {}
+          status = payload.get('status')
+          if isinstance(status, dict):
+              safe['status'] = {
+                  'code': status.get('code'),
+                  'message': status.get('message'),
+              }
+          for key in ('code', 'message', 'ok'):
+              if key in payload:
+                  safe[key] = payload[key]
+
+          print('Response keys:', sorted(payload.keys())[:20])
+          print('Safe summary:', json.dumps(safe, ensure_ascii=False)[:1000])
+
+          upstream_code = None
+          if isinstance(status, dict):
+              upstream_code = status.get('code')
+
+          if upstream_code == 'SUCCESS':
+              raise SystemExit('Synthetic voucher unexpectedly succeeded; refusing to continue')
+
+          if not safe:
+              raise SystemExit('Unrecognized response contract')
+          PY
+
+          echo "PASS: ${PROVIDER_NAME} is reachable and returned a recognized fake-voucher response"

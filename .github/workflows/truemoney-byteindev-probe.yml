@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - upgrade/truemoney-byteindev-20260920
+      - fix/truemoney-disable-go-20260920
   workflow_dispatch:
 
 permissions:
@@ -18,8 +19,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: go
-            base_url: https://truemoney-voucher-go.vercel.app
           - name: nestjs
             base_url: https://truemoney-voucher-nestjs.vercel.app
           - name: fastapi

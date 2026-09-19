@@ -44,6 +44,18 @@ function b_health_ok(string $url, int $timeout): array
     ];
 }
 
+function b_redeem(string $voucher, string $phone, callable $redeemTransport, ?callable $healthTransport = null): array
+{
+    $debug = null;
+    return redeemAngpaoByteIndev(
+        $voucher,
+        $phone,
+        $debug,
+        $healthTransport ?? 'b_health_ok',
+        $redeemTransport
+    );
+}
+
 $token = '019e0d03f0fa78bf893eb17f3750d31a4cS';
 $voucher = 'https://gift.truemoney.com/campaign/?v=' . $token;
 $phone = '0812345678';
@@ -64,7 +76,8 @@ b_assert(trueMoneyByteIndevAmount([
 ]) === null, 'unapproved amount path must not be accepted');
 
 $healthCalls = [];
-$selection = trueMoneyByteIndevSelectProvider($unused = null, static function (string $url, int $timeout) use (&$healthCalls): array {
+$unusedDebug = null;
+$selection = trueMoneyByteIndevSelectProvider($unusedDebug, static function (string $url, int $timeout) use (&$healthCalls): array {
     $healthCalls[] = $url;
     if (strpos($url, 'truemoney-voucher-go.vercel.app') !== false) {
         return [
@@ -85,11 +98,9 @@ b_assert(($selection['provider']['name'] ?? '') === 'nestjs', 'NestJS should be 
 b_assert(count($healthCalls) === 2, 'health selection should stop after first healthy backend');
 
 $redeemCalls = [];
-$result = redeemAngpaoByteIndev(
+$result = b_redeem(
     $voucher,
     $phone,
-    $debug = null,
-    'b_health_ok',
     static function (string $url, int $timeout) use (&$redeemCalls): array {
         $redeemCalls[] = $url;
         return b_response([
@@ -104,11 +115,9 @@ b_assert(($result['backend'] ?? '') === 'go', 'first healthy backend should be u
 b_assert(count($redeemCalls) === 1, 'redeem must call exactly one backend');
 b_assert(strpos($redeemCalls[0], '/truemoney/' . rawurlencode($token) . '/' . $phone) !== false, 'redeem path should contain encoded voucher token and receiver phone');
 
-$result = redeemAngpaoByteIndev(
+$result = b_redeem(
     $voucher,
     $phone,
-    $debug = null,
-    'b_health_ok',
     static function (): array {
         return b_response([
             'status' => ['code' => 'VOUCHER_NOT_FOUND', 'message' => "Voucher doesn't exist."],
@@ -120,11 +129,9 @@ b_assert(empty($result['success']), 'VOUCHER_NOT_FOUND should fail');
 b_assert(($result['code'] ?? '') === 'VOUCHER_NOT_FOUND', 'business failure code should be preserved');
 b_assert(empty($result['indeterminate']), 'business failure should be definitive');
 
-$result = redeemAngpaoByteIndev(
+$result = b_redeem(
     $voucher,
     $phone,
-    $debug = null,
-    'b_health_ok',
     static function (): array {
         return b_response(['code' => 400, 'message' => 'Bad Request'], 200);
     }
@@ -132,11 +139,9 @@ $result = redeemAngpaoByteIndev(
 b_assert(empty($result['success']) && ($result['code'] ?? '') === 'provider_400', 'backend validation envelope should be definitive');
 b_assert(empty($result['indeterminate']), 'backend 400 envelope should not be indeterminate');
 
-$result = redeemAngpaoByteIndev(
+$result = b_redeem(
     $voucher,
     $phone,
-    $debug = null,
-    'b_health_ok',
     static function (): array {
         return b_response(['code' => 500, 'message' => 'Internal Server Error'], 200);
     }
@@ -144,11 +149,9 @@ $result = redeemAngpaoByteIndev(
 b_assert(empty($result['success']) && !empty($result['indeterminate']), 'backend 500 envelope after redeem should be indeterminate');
 
 $timeoutCalls = 0;
-$result = redeemAngpaoByteIndev(
+$result = b_redeem(
     $voucher,
     $phone,
-    $debug = null,
-    'b_health_ok',
     static function () use (&$timeoutCalls): array {
         $timeoutCalls++;
         return [
@@ -166,22 +169,18 @@ $result = redeemAngpaoByteIndev(
 b_assert(empty($result['success']) && !empty($result['indeterminate']), 'redeem timeout should be indeterminate');
 b_assert($timeoutCalls === 1, 'redeem timeout must not trigger backend failover');
 
-$result = redeemAngpaoByteIndev(
+$result = b_redeem(
     $voucher,
     $phone,
-    $debug = null,
-    'b_health_ok',
     static function (): array {
         return b_response(['error' => 'gateway exploded'], 502);
     }
 );
 b_assert(empty($result['success']) && !empty($result['indeterminate']), 'HTTP 5xx after redeem should be indeterminate');
 
-$result = redeemAngpaoByteIndev(
+$result = b_redeem(
     $voucher,
     $phone,
-    $debug = null,
-    'b_health_ok',
     static function (): array {
         return [
             'executed' => true,
@@ -197,11 +196,9 @@ $result = redeemAngpaoByteIndev(
 );
 b_assert(empty($result['success']) && !empty($result['indeterminate']), 'invalid 2xx JSON should be indeterminate');
 
-$result = redeemAngpaoByteIndev(
+$result = b_redeem(
     $voucher,
     $phone,
-    $debug = null,
-    'b_health_ok',
     static function (): array {
         return b_response([
             'status' => ['code' => 'SUCCESS', 'message' => 'Success'],
@@ -211,11 +208,9 @@ $result = redeemAngpaoByteIndev(
 );
 b_assert(empty($result['success']) && !empty($result['indeterminate']), 'SUCCESS without amount should be indeterminate');
 
-$result = redeemAngpaoByteIndev(
+$result = b_redeem(
     $voucher,
     $phone,
-    $debug = null,
-    'b_health_ok',
     static function (): array {
         return b_response(['code' => 429, 'message' => 'Too Many Requests'], 429);
     }
@@ -224,10 +219,13 @@ b_assert(empty($result['success']) && ($result['code'] ?? '') === 'provider_rate
 b_assert(empty($result['indeterminate']), 'HTTP 429 should be safe to retry later');
 
 $redeemWasCalled = false;
-$result = redeemAngpaoByteIndev(
+$result = b_redeem(
     $voucher,
     $phone,
-    $debug = null,
+    static function () use (&$redeemWasCalled): array {
+        $redeemWasCalled = true;
+        return b_response([]);
+    },
     static function (): array {
         return [
             'executed' => false,
@@ -239,10 +237,6 @@ $result = redeemAngpaoByteIndev(
             'response_too_large' => false,
             'timing' => ['total_ms' => 1],
         ];
-    },
-    static function () use (&$redeemWasCalled): array {
-        $redeemWasCalled = true;
-        return b_response([]);
     }
 );
 b_assert(empty($result['success']) && ($result['code'] ?? '') === 'provider_unavailable', 'all failed health probes should stop before redeem');

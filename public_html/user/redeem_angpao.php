@@ -3,7 +3,7 @@ ob_start();
 require_once '../includes/auth.php';
 require_once '../includes/ranking.php';
 require_once '../includes/truemoney.php';
-require_once '../includes/truemoney_zelthr.php';
+require_once '../includes/truemoney_dokmai.php';
 
 requireLogin(true);
 requireActive();
@@ -16,7 +16,7 @@ requireCsrfToken();
 
 $userId = (int) ($_SESSION['user_id'] ?? 0);
 $tmDebug = trueMoneyDebugStart($userId);
-trueMoneyZelthrInitializeDebug($tmDebug);
+trueMoneyDokmaiInitializeDebug($tmDebug);
 if (!headers_sent()) {
     header('X-Sakazuki-Debug-Request-ID: ' . (string) $tmDebug['request_id']);
 }
@@ -69,29 +69,37 @@ if (getSetting('truemoney_enabled') !== '1') {
     trueMoneyDebugError($tmDebug, 'feature_disabled', 'truemoney_disabled', 'TrueMoney redemption feature is disabled');
     $debugRespond($tmDebug, ['success' => false, 'message' => 'ระบบ TrueMoney ถูกปิดใช้งาน'], 'feature_disabled', 'truemoney_disabled');
 }
+
 $tmPhone = preg_replace('/\D+/', '', (string) getSetting('truemoney_phone'));
+$dokmaiApiKey = trueMoneyDokmaiApiKey();
 $tmDebug['configuration'] = [
     'enabled' => true,
     'receiver_phone_masked' => trueMoneyDebugMaskedPhone($tmPhone),
     'receiver_phone_length' => strlen($tmPhone),
-    'provider' => trueMoneyZelthrProviderName(),
-    'provider_display_name' => trueMoneyZelthrProviderDisplayName(),
+    'provider' => trueMoneyDokmaiProviderName(),
+    'provider_display_name' => trueMoneyDokmaiProviderDisplayName(),
     'provider_target' => [
         'scheme' => 'https',
-        'host' => 'api.zelthr.rest',
+        'host' => 'api.dokmaistore.com',
         'port' => 443,
-        'path' => '/',
+        'path' => '/api/v1/payments/core/angpao/redeem',
         'query_present' => false,
-        'path_segment_count' => 0,
+        'path_segment_count' => 6,
         'sensitive_path_redacted' => false,
     ],
-    'provider_authorization_configured' => false,
+    'provider_authorization_configured' => $dokmaiApiKey !== '',
+    'provider_authorization_stored' => false,
+    'idempotency_enabled' => true,
     'fee_rate' => (float) TM_FEE_RATE,
     'fee_cap_thb' => (float) TM_FEE_CAP_THB,
 ];
 if (preg_match('/^0\d{9}$/', $tmPhone) !== 1) {
     trueMoneyDebugError($tmDebug, 'configuration_invalid', 'receiver_phone_invalid', 'Configured TrueMoney receiver phone is invalid');
     $debugRespond($tmDebug, ['success' => false, 'message' => 'ยังไม่ได้ตั้งค่าเบอร์รับ TrueMoney อย่างถูกต้อง'], 'configuration_invalid', 'receiver_phone_invalid');
+}
+if ($dokmaiApiKey === '') {
+    trueMoneyDebugError($tmDebug, 'configuration_invalid', 'dokmai_api_key_missing', 'Dokmai API key is not configured');
+    $debugRespond($tmDebug, ['success' => false, 'message' => 'ระบบรับซองยังไม่ได้ตั้งค่า Dokmai API key'], 'configuration_invalid', 'dokmai_api_key_missing');
 }
 trueMoneyDebugEvent($tmDebug, 'configuration_validated');
 
@@ -102,22 +110,8 @@ if (empty($normalized['success'])) {
 }
 $voucherHash = hash('sha256', (string) $normalized['token']);
 $tmDebug['redemption']['voucher_fingerprint'] = substr($voucherHash, 0, 16);
+$tmDebug['redemption']['idempotency_key_sha256'] = hash('sha256', trueMoneyDokmaiIdempotencyKey($userId, $voucherHash));
 trueMoneyDebugEvent($tmDebug, 'voucher_validated', ['voucher_fingerprint' => substr($voucherHash, 0, 16)]);
-
-// A prior ambiguous POST is never fired again automatically. Zelthr exposes a
-// redeem endpoint, not a read-only voucher reconciliation endpoint, so the safest
-// action is to keep that voucher parked for manual review.
-$pendingState = trueMoneyZelthrPendingState($voucherHash, $userId);
-if (!empty($pendingState['pending'])) {
-    $tmDebug['redemption']['id'] = (int) ($pendingState['redemption_id'] ?? 0);
-    trueMoneyDebugError($tmDebug, 'indeterminate_reconciliation_pending', 'provider_indeterminate_pending', (string) ($pendingState['message'] ?? 'Previous redemption is still indeterminate'));
-    $debugRespond(
-        $tmDebug,
-        ['success' => false, 'message' => $pendingState['message'] ?? 'รายการก่อนหน้ายังรอตรวจสอบสถานะ'],
-        'indeterminate_reconciliation_pending',
-        'provider_indeterminate_pending'
-    );
-}
 
 $reservation = beginTrueMoneyRedemption($voucherHash, $userId, $tmDebug);
 if (empty($reservation['success'])) {
@@ -135,12 +129,20 @@ if (($reservation['mode'] ?? '') === 'resume') {
     $amountThb = (float) $reservation['amount_thb'];
     trueMoneyDebugEvent($tmDebug, 'provider_call_skipped_resume_mode', ['stored_amount_thb' => $amountThb]);
 } else {
-    $providerResult = redeemAngpaoZelthr((string) $normalized['url'], $tmPhone, $tmDebug);
+    $providerResult = redeemAngpaoDokmai(
+        (string) $normalized['url'],
+        $tmPhone,
+        $userId,
+        $voucherHash,
+        $tmDebug,
+        null,
+        $dokmaiApiKey
+    );
     trueMoneyDebugPersist($tmDebug);
     if (empty($providerResult['success'])) {
         $providerMessage = (string) ($providerResult['message'] ?? 'TrueMoney rejected voucher');
         if (!empty($providerResult['indeterminate'])) {
-            trueMoneyZelthrMarkIndeterminate($redemptionId, $userId, $providerMessage, $tmDebug);
+            trueMoneyDokmaiMarkIndeterminate($redemptionId, $userId, $providerMessage, $tmDebug);
         } else {
             markTrueMoneyRedemptionFailed(
                 $redemptionId,

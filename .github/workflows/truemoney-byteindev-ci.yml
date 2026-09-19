@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - upgrade/truemoney-byteindev-20260920
+      - fix/truemoney-disable-go-20260920
   workflow_dispatch:
 
 permissions:
@@ -30,13 +31,17 @@ jobs:
         run: |
           set -euo pipefail
           php -l public_html/includes/truemoney_byteindev.php
+          php -l public_html/includes/truemoney_byteindev_route.php
+          php -l public_html/user/redeem_angpao.php
           php -l tests/truemoney_byteindev_test.php
+          php -l tests/truemoney_byteindev_routing_test.php
 
       - name: Run ByteInDev regression tests
         shell: bash
         run: |
           set -euo pipefail
           php tests/truemoney_byteindev_test.php
+          php tests/truemoney_byteindev_routing_test.php
 
       - name: Lint all production PHP
         shell: bash

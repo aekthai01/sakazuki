@@ -4,6 +4,7 @@ require_once '../includes/auth.php';
 require_once '../includes/ranking.php';
 require_once '../includes/truemoney.php';
 require_once '../includes/truemoney_byteindev.php';
+require_once '../includes/truemoney_byteindev_route.php';
 
 requireLogin(true);
 requireActive();
@@ -132,7 +133,12 @@ if (($reservation['mode'] ?? '') === 'resume') {
     $amountThb = (float) $reservation['amount_thb'];
     trueMoneyDebugEvent($tmDebug, 'provider_call_skipped_resume_mode', ['stored_amount_thb' => $amountThb]);
 } else {
-    $providerResult = redeemAngpaoByteIndev((string) $normalized['url'], $tmPhone, $tmDebug);
+    $providerResult = redeemAngpaoByteIndev(
+        (string) $normalized['url'],
+        $tmPhone,
+        $tmDebug,
+        'trueMoneyByteIndevProductionHealthTransport'
+    );
     trueMoneyDebugPersist($tmDebug);
     if (empty($providerResult['success'])) {
         $providerMessage = (string) ($providerResult['message'] ?? 'TrueMoney provider rejected voucher');

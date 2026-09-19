@@ -10,6 +10,7 @@ on:
 permissions:
   contents: read
 
+# Non-destructive provider reachability probe. Uses synthetic voucher data only.
 jobs:
   probe:
     runs-on: ubuntu-latest

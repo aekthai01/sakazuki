@@ -1,0 +1,69 @@
+name: TrueMoney Dokmai CI
+
+on:
+  push:
+    branches:
+      - upgrade/truemoney-dokmai-20260919
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: PHP lint and regression tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show PHP version
+        run: php --version
+
+      - name: Lint Dokmai integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          php -l public_html/includes/truemoney_dokmai.php
+          php -l public_html/user/redeem_angpao.php
+          php -l tests/truemoney_dokmai_test.php
+          php -l tests/truemoney_dokmai_live_smoke.php
+
+      - name: Run Dokmai regression tests
+        run: php tests/truemoney_dokmai_test.php
+
+      - name: Lint every production PHP file
+        shell: bash
+        run: |
+          set -euo pipefail
+          count=0
+          while IFS= read -r -d '' file; do
+            php -l "$file" >/dev/null
+            count=$((count + 1))
+          done < <(find public_html -type f -name '*.php' -print0)
+          echo "PASS: linted ${count} production PHP files"
+
+  live-smoke:
+    name: Authenticated Dokmai live smoke
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      DOKMAI_API_KEY: ${{ secrets.DOKMAI_API_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Require Dokmai API key
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${DOKMAI_API_KEY:-}" ]; then
+            echo 'DOKMAI_API_KEY repository secret is not configured.'
+            exit 1
+          fi
+          echo 'Dokmai API key is configured.'
+
+      - name: Run authenticated synthetic-voucher smoke test
+        run: php tests/truemoney_dokmai_live_smoke.php

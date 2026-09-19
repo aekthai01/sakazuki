@@ -173,11 +173,22 @@ jobs:
 
           rm -rf deploy-source/assets/uploads
           mkdir -p deploy-source/assets/uploads/icons deploy-source/assets/uploads/products
-          cp public_html/assets/uploads/.htaccess deploy-source/assets/uploads/.htaccess
-          cp public_html/assets/uploads/icons/.htaccess deploy-source/assets/uploads/icons/.htaccess
-          cp public_html/assets/uploads/icons/index.php deploy-source/assets/uploads/icons/index.php
-          cp public_html/assets/uploads/products/.htaccess deploy-source/assets/uploads/products/.htaccess
-          cp public_html/assets/uploads/products/index.php deploy-source/assets/uploads/products/index.php
+
+          guard_files=(
+            'assets/uploads/.htaccess'
+            'assets/uploads/icons/.htaccess'
+            'assets/uploads/icons/index.php'
+            'assets/uploads/products/.htaccess'
+            'assets/uploads/products/index.php'
+          )
+          for file in "${guard_files[@]}"; do
+            if [ -f "public_html/$file" ]; then
+              mkdir -p "deploy-source/$(dirname "$file")"
+              cp "public_html/$file" "deploy-source/$file"
+            else
+              echo "Optional upload guard not tracked; leaving remote copy untouched: $file"
+            fi
+          done
 
           test -f deploy-source/includes/truemoney_byteindev.php
           test -f deploy-source/user/redeem_angpao.php

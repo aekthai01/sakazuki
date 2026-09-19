@@ -1,0 +1,70 @@
+name: Dokmai Provider Probe
+
+on:
+  push:
+    branches:
+      - upgrade/truemoney-direct-20260919
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      DOKMAI_API_KEY: ${{ secrets.DOKMAI_API_KEY }}
+
+    steps:
+      - name: Check Dokmai credential availability
+        id: credential
+        shell: bash
+        run: |
+          if [ -n "${DOKMAI_API_KEY:-}" ]; then
+            echo 'Dokmai API key: configured'
+            echo 'configured=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'Dokmai API key: NOT configured'
+            echo 'configured=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Probe Dokmai endpoint with fake voucher
+        shell: bash
+        run: |
+          set -euo pipefail
+          key="${DOKMAI_API_KEY:-sakazuki-probe-invalid-key}"
+          body='{"phoneNumber":"0812345678","voucher":"https://gift.truemoney.com/campaign/?v=ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ"}'
+          http_code="$(curl --silent --show-error --connect-timeout 10 --max-time 30 \
+            --output /tmp/dokmai-probe.json \
+            --write-out '%{http_code}' \
+            --request POST \
+            --header 'content-type: application/json' \
+            --header "x-dokmai-api-key: ${key}" \
+            --header 'Idempotency-Key: sakazuki-ci-fake-voucher-probe' \
+            --data "$body" \
+            'https://api.dokmaistore.com/api/v1/payments/core/angpao/redeem')"
+
+          echo "Dokmai HTTP status: ${http_code}"
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          raw = Path('/tmp/dokmai-probe.json').read_text(errors='replace')
+          try:
+              payload = json.loads(raw)
+          except Exception as exc:
+              raise SystemExit(f'Dokmai response is not JSON: {type(exc).__name__}')
+          if isinstance(payload, dict):
+              safe = {}
+              for key in ('success', 'status', 'code', 'error', 'message'):
+                  if key in payload:
+                      safe[key] = payload[key]
+              print('Dokmai response contract keys:', sorted(payload.keys())[:20])
+              print('Dokmai safe summary:', json.dumps(safe, ensure_ascii=False)[:1000])
+          else:
+              raise SystemExit('Dokmai response is not a JSON object')
+          PY
+
+          if [ "$http_code" = '000' ] || [ "$http_code" -ge 500 ]; then
+            echo 'Dokmai endpoint is not healthy enough for production'
+            exit 1
+          fi

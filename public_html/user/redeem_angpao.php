@@ -3,6 +3,7 @@ ob_start();
 require_once '../includes/auth.php';
 require_once '../includes/ranking.php';
 require_once '../includes/truemoney.php';
+require_once '../includes/truemoney_dokmai.php';
 
 requireLogin(true);
 requireActive();
@@ -15,6 +16,7 @@ requireCsrfToken();
 
 $userId = (int) ($_SESSION['user_id'] ?? 0);
 $tmDebug = trueMoneyDebugStart($userId);
+trueMoneyDokmaiInitializeDebug($tmDebug);
 if (!headers_sent()) {
     header('X-Sakazuki-Debug-Request-ID: ' . (string) $tmDebug['request_id']);
 }
@@ -67,21 +69,37 @@ if (getSetting('truemoney_enabled') !== '1') {
     trueMoneyDebugError($tmDebug, 'feature_disabled', 'truemoney_disabled', 'TrueMoney redemption feature is disabled');
     $debugRespond($tmDebug, ['success' => false, 'message' => 'ระบบ TrueMoney ถูกปิดใช้งาน'], 'feature_disabled', 'truemoney_disabled');
 }
+
 $tmPhone = preg_replace('/\D+/', '', (string) getSetting('truemoney_phone'));
+$dokmaiApiKey = trueMoneyDokmaiApiKey();
 $tmDebug['configuration'] = [
     'enabled' => true,
     'receiver_phone_masked' => trueMoneyDebugMaskedPhone($tmPhone),
     'receiver_phone_length' => strlen($tmPhone),
-    'provider' => trueMoneyProviderName(),
-    'provider_display_name' => trueMoneyProviderDisplayName(),
-    'provider_target' => trueMoneyDebugProviderUrlSummary((string) TM_API_URL),
-    'provider_authorization_configured' => trueMoneyProviderName() === 'legacy_vercel' && defined('TRUEMONEY_PROVIDER_TOKEN') && trim((string) TRUEMONEY_PROVIDER_TOKEN) !== '',
+    'provider' => trueMoneyDokmaiProviderName(),
+    'provider_display_name' => trueMoneyDokmaiProviderDisplayName(),
+    'provider_target' => [
+        'scheme' => 'https',
+        'host' => 'api.dokmaistore.com',
+        'port' => 443,
+        'path' => '/api/v1/payments/core/angpao/redeem',
+        'query_present' => false,
+        'path_segment_count' => 6,
+        'sensitive_path_redacted' => false,
+    ],
+    'provider_authorization_configured' => $dokmaiApiKey !== '',
+    'provider_authorization_stored' => false,
+    'idempotency_enabled' => true,
     'fee_rate' => (float) TM_FEE_RATE,
     'fee_cap_thb' => (float) TM_FEE_CAP_THB,
 ];
 if (preg_match('/^0\d{9}$/', $tmPhone) !== 1) {
     trueMoneyDebugError($tmDebug, 'configuration_invalid', 'receiver_phone_invalid', 'Configured TrueMoney receiver phone is invalid');
     $debugRespond($tmDebug, ['success' => false, 'message' => 'ยังไม่ได้ตั้งค่าเบอร์รับ TrueMoney อย่างถูกต้อง'], 'configuration_invalid', 'receiver_phone_invalid');
+}
+if ($dokmaiApiKey === '') {
+    trueMoneyDebugError($tmDebug, 'configuration_invalid', 'dokmai_api_key_missing', 'Dokmai API key is not configured');
+    $debugRespond($tmDebug, ['success' => false, 'message' => 'ระบบรับซองยังไม่ได้ตั้งค่า Dokmai API key'], 'configuration_invalid', 'dokmai_api_key_missing');
 }
 trueMoneyDebugEvent($tmDebug, 'configuration_validated');
 
@@ -92,6 +110,7 @@ if (empty($normalized['success'])) {
 }
 $voucherHash = hash('sha256', (string) $normalized['token']);
 $tmDebug['redemption']['voucher_fingerprint'] = substr($voucherHash, 0, 16);
+$tmDebug['redemption']['idempotency_key_sha256'] = hash('sha256', trueMoneyDokmaiIdempotencyKey($userId, $voucherHash));
 trueMoneyDebugEvent($tmDebug, 'voucher_validated', ['voucher_fingerprint' => substr($voucherHash, 0, 16)]);
 
 $reservation = beginTrueMoneyRedemption($voucherHash, $userId, $tmDebug);
@@ -110,26 +129,39 @@ if (($reservation['mode'] ?? '') === 'resume') {
     $amountThb = (float) $reservation['amount_thb'];
     trueMoneyDebugEvent($tmDebug, 'provider_call_skipped_resume_mode', ['stored_amount_thb' => $amountThb]);
 } else {
-    $providerResult = redeemAngpao($normalized['url'], $tmPhone, $tmDebug);
+    $providerResult = redeemAngpaoDokmai(
+        (string) $normalized['url'],
+        $tmPhone,
+        $userId,
+        $voucherHash,
+        $tmDebug,
+        null,
+        $dokmaiApiKey
+    );
     trueMoneyDebugPersist($tmDebug);
     if (empty($providerResult['success'])) {
-        markTrueMoneyRedemptionFailed(
-            $redemptionId,
-            $userId,
-            (string) ($providerResult['message'] ?? 'Provider rejected voucher'),
-            $tmDebug
-        );
-        $code = $lastDebugErrorCode($tmDebug, 'provider_failed');
+        $providerMessage = (string) ($providerResult['message'] ?? 'TrueMoney rejected voucher');
+        if (!empty($providerResult['indeterminate'])) {
+            trueMoneyDokmaiMarkIndeterminate($redemptionId, $userId, $providerMessage, $tmDebug);
+        } else {
+            markTrueMoneyRedemptionFailed(
+                $redemptionId,
+                $userId,
+                $providerMessage,
+                $tmDebug
+            );
+        }
+        $code = (string) ($providerResult['code'] ?? $lastDebugErrorCode($tmDebug, 'provider_failed'));
         $debugRespond(
             $tmDebug,
-            ['success' => false, 'message' => $providerResult['message'] ?? 'ไม่สามารถรับซองของขวัญได้'],
-            'provider_failed',
+            ['success' => false, 'message' => $providerMessage],
+            !empty($providerResult['indeterminate']) ? 'provider_indeterminate' : 'provider_failed',
             $code
         );
     }
     $amountThb = (float) $providerResult['amount'];
     if (!markTrueMoneyProviderConfirmed($redemptionId, $userId, $amountThb, $tmDebug)) {
-        trueMoneyDebugError($tmDebug, 'provider_confirmation_persist_failed', 'provider_confirmation_persist_failed', 'Provider accepted the voucher but local provider-confirmed state was not persisted');
+        trueMoneyDebugError($tmDebug, 'provider_confirmation_persist_failed', 'provider_confirmation_persist_failed', 'TrueMoney accepted the voucher but local provider-confirmed state was not persisted');
         $debugRespond(
             $tmDebug,
             ['success' => false, 'message' => 'รับซองสำเร็จ แต่ยังบันทึกสถานะไม่เสร็จ กรุณาส่งลิงก์เดิมอีกครั้ง'],
@@ -170,7 +202,7 @@ if ($appCurrency === 'USD') {
     trueMoneyDebugEvent($tmDebug, 'exchange_rate_lookup_started');
     $rate = getExchangeRateThbToUsd();
     if (!$rate || !is_finite((float) $rate) || (float) $rate <= 0) {
-        trueMoneyDebugError($tmDebug, 'exchange_rate_lookup_failed', 'exchange_rate_unavailable', 'Provider accepted the voucher but THB to USD exchange rate is unavailable');
+        trueMoneyDebugError($tmDebug, 'exchange_rate_lookup_failed', 'exchange_rate_unavailable', 'TrueMoney accepted the voucher but THB to USD exchange rate is unavailable');
         $debugRespond(
             $tmDebug,
             ['success' => false, 'message' => 'รับซองสำเร็จแล้ว แต่ยังดึงอัตราแลกเปลี่ยนไม่ได้ กรุณาส่งลิงก์เดิมอีกครั้ง'],

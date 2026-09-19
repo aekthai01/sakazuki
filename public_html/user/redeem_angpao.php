@@ -3,7 +3,7 @@ ob_start();
 require_once '../includes/auth.php';
 require_once '../includes/ranking.php';
 require_once '../includes/truemoney.php';
-require_once '../includes/truemoney_direct.php';
+require_once '../includes/truemoney_zelthr.php';
 
 requireLogin(true);
 requireActive();
@@ -16,7 +16,7 @@ requireCsrfToken();
 
 $userId = (int) ($_SESSION['user_id'] ?? 0);
 $tmDebug = trueMoneyDebugStart($userId);
-trueMoneyDirectInitializeDebug($tmDebug);
+trueMoneyZelthrInitializeDebug($tmDebug);
 if (!headers_sent()) {
     header('X-Sakazuki-Debug-Request-ID: ' . (string) $tmDebug['request_id']);
 }
@@ -74,13 +74,13 @@ $tmDebug['configuration'] = [
     'enabled' => true,
     'receiver_phone_masked' => trueMoneyDebugMaskedPhone($tmPhone),
     'receiver_phone_length' => strlen($tmPhone),
-    'provider' => trueMoneyDirectProviderName(),
-    'provider_display_name' => trueMoneyDirectProviderDisplayName(),
+    'provider' => trueMoneyZelthrProviderName(),
+    'provider_display_name' => trueMoneyZelthrProviderDisplayName(),
     'provider_target' => [
         'scheme' => 'https',
-        'host' => 'gift.truemoney.com',
+        'host' => 'api.zelthr.rest',
         'port' => 443,
-        'path' => '',
+        'path' => '/',
         'query_present' => false,
         'path_segment_count' => 0,
         'sensitive_path_redacted' => false,
@@ -104,20 +104,16 @@ $voucherHash = hash('sha256', (string) $normalized['token']);
 $tmDebug['redemption']['voucher_fingerprint'] = substr($voucherHash, 0, 16);
 trueMoneyDebugEvent($tmDebug, 'voucher_validated', ['voucher_fingerprint' => substr($voucherHash, 0, 16)]);
 
-// A previous redeem POST may have reached TrueMoney even if its response was lost.
-// Reconcile it read-only before beginTrueMoneyRedemption() is allowed to reset the row.
-$reconciliation = trueMoneyDirectReconcileIndeterminate(
-    $voucherHash,
-    $userId,
-    (string) $normalized['url'],
-    $tmPhone,
-    $tmDebug
-);
-if (($reconciliation['state'] ?? 'none') === 'pending') {
-    trueMoneyDebugError($tmDebug, 'indeterminate_reconciliation_pending', 'provider_indeterminate_pending', (string) ($reconciliation['message'] ?? 'Previous redemption is still indeterminate'));
+// A prior ambiguous POST is never fired again automatically. Zelthr exposes a
+// redeem endpoint, not a read-only voucher reconciliation endpoint, so the safest
+// action is to keep that voucher parked for manual review.
+$pendingState = trueMoneyZelthrPendingState($voucherHash, $userId);
+if (!empty($pendingState['pending'])) {
+    $tmDebug['redemption']['id'] = (int) ($pendingState['redemption_id'] ?? 0);
+    trueMoneyDebugError($tmDebug, 'indeterminate_reconciliation_pending', 'provider_indeterminate_pending', (string) ($pendingState['message'] ?? 'Previous redemption is still indeterminate'));
     $debugRespond(
         $tmDebug,
-        ['success' => false, 'message' => $reconciliation['message'] ?? 'รายการก่อนหน้ายังรอตรวจสอบสถานะ'],
+        ['success' => false, 'message' => $pendingState['message'] ?? 'รายการก่อนหน้ายังรอตรวจสอบสถานะ'],
         'indeterminate_reconciliation_pending',
         'provider_indeterminate_pending'
     );
@@ -139,12 +135,12 @@ if (($reservation['mode'] ?? '') === 'resume') {
     $amountThb = (float) $reservation['amount_thb'];
     trueMoneyDebugEvent($tmDebug, 'provider_call_skipped_resume_mode', ['stored_amount_thb' => $amountThb]);
 } else {
-    $providerResult = redeemAngpaoDirect((string) $normalized['url'], $tmPhone, $tmDebug);
+    $providerResult = redeemAngpaoZelthr((string) $normalized['url'], $tmPhone, $tmDebug);
     trueMoneyDebugPersist($tmDebug);
     if (empty($providerResult['success'])) {
         $providerMessage = (string) ($providerResult['message'] ?? 'TrueMoney rejected voucher');
         if (!empty($providerResult['indeterminate'])) {
-            trueMoneyDirectMarkIndeterminate($redemptionId, $userId, $providerMessage, $tmDebug);
+            trueMoneyZelthrMarkIndeterminate($redemptionId, $userId, $providerMessage, $tmDebug);
         } else {
             markTrueMoneyRedemptionFailed(
                 $redemptionId,

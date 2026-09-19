@@ -1,0 +1,81 @@
+name: TrueMoney Zelthr CI
+
+on:
+  push:
+    branches:
+      - upgrade/truemoney-direct-20260919
+  pull_request:
+    paths:
+      - 'public_html/includes/truemoney_zelthr.php'
+      - 'public_html/user/redeem_angpao.php'
+      - 'tests/truemoney_zelthr_test.php'
+      - 'tests/truemoney_zelthr_live_smoke.php'
+      - '.github/workflows/truemoney-zelthr-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: curl, json, mbstring, mysqli
+          coverage: none
+
+      - name: Lint changed TrueMoney files
+        shell: bash
+        run: |
+          set -euo pipefail
+          php -l public_html/includes/truemoney_zelthr.php
+          php -l public_html/user/redeem_angpao.php
+          php -l tests/truemoney_zelthr_test.php
+          php -l tests/truemoney_zelthr_live_smoke.php
+
+      - name: Run Zelthr regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          php tests/truemoney_zelthr_test.php
+
+      - name: Ensure blocked direct adapter is not referenced
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -R --line-number --fixed-strings 'truemoney_direct.php' public_html tests 2>/dev/null; then
+            echo 'Blocked direct TrueMoney adapter reference remains in the tree'
+            exit 1
+          fi
+
+      - name: Lint all production PHP
+        shell: bash
+        run: |
+          set -euo pipefail
+          failures=0
+          count=0
+          while IFS= read -r -d '' file; do
+            count=$((count + 1))
+            if ! php -l "$file" >/tmp/php-lint.out 2>&1; then
+              cat /tmp/php-lint.out
+              failures=$((failures + 1))
+            fi
+          done < <(find public_html -type f -name '*.php' -print0)
+          echo "PHP files checked: $count"
+          if [ "$failures" -ne 0 ]; then
+            echo "PHP syntax failures: $failures"
+            exit 1
+          fi
+
+      - name: Live smoke test Zelthr with fake voucher
+        shell: bash
+        run: |
+          set -euo pipefail
+          php tests/truemoney_zelthr_live_smoke.php

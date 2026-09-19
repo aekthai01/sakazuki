@@ -1,5 +1,69 @@
 <?php
-require_once __DIR__ . '/../public_html/includes/truemoney.php';
+function trueMoneyDebugSafeText($value, int $maxLength = 1500): string
+{
+    $text = is_scalar($value) ? trim((string) $value) : '';
+    return strlen($text) > $maxLength ? substr($text, 0, $maxLength) : $text;
+}
+
+function trueMoneyDebugSanitize($value, int $depth = 0)
+{
+    return $value;
+}
+
+function trueMoneyDebugMaskedPhone(string $digits): string
+{
+    $digits = preg_replace('/\D+/', '', $digits) ?? '';
+    return $digits === '' ? '' : str_repeat('*', max(0, strlen($digits) - 4)) . substr($digits, -4);
+}
+
+function trueMoneyDebugId(string $prefix): string
+{
+    return $prefix . substr(hash('sha256', $prefix . microtime(true) . random_int(1, 999999)), 0, 24);
+}
+
+function trueMoneyDebugStart(int $userId): array
+{
+    return [
+        '_started_at' => microtime(true),
+        'schema' => 'sakazuki.debug',
+        'version' => 1,
+        'type' => 'truemoney.redemption',
+        'request_id' => trueMoneyDebugId('tmreq_'),
+        'attempt_id' => null,
+        'client' => ['user_id' => $userId],
+        'redemption' => ['id' => null, 'voucher_fingerprint' => null, 'reservation_mode' => null],
+        'provider' => [],
+        'settlement' => [],
+        'wallet' => [],
+        'integrity' => [],
+        'timeline' => [],
+        'result' => ['success' => null, 'stage' => 'request_received', 'code' => null],
+        'errors' => [],
+        'privacy' => [
+            'voucher_token_stored' => false,
+            'raw_provider_body_stored' => false,
+            'raw_provider_effective_url_stored' => false,
+            'credentials_redacted' => true,
+        ],
+    ];
+}
+
+function trueMoneyDebugEvent(array &$debug, string $stage, array $details = []): void
+{
+    $debug['timeline'][] = ['stage' => $stage, 'details' => $details];
+    $debug['result']['stage'] = $stage;
+}
+
+function trueMoneyDebugSetResult(array &$debug, bool $success, string $stage, string $code): void
+{
+    $debug['result'] = ['success' => $success, 'stage' => $stage, 'code' => $code];
+}
+
+function trueMoneyDebugPersist(array &$debug): bool
+{
+    return true;
+}
+
 require_once __DIR__ . '/../public_html/includes/truemoney_byteindev.php';
 require_once __DIR__ . '/../public_html/includes/truemoney_byteindev_route.php';
 require_once __DIR__ . '/../public_html/includes/truemoney_byteindev_debug.php';
@@ -70,7 +134,6 @@ d_assert(($probe['probe']['summary']['usable_backend_count'] ?? 0) === 2, 'Both 
 d_assert(($probe['probe']['summary']['degraded'] ?? true) === false, 'Two usable backends must not be degraded');
 d_assert(($probe['provider']['target']['host'] ?? '') === 'truemoney-voucher-nestjs.vercel.app', 'Summary host should be selected NestJS');
 d_assert(count($delegateCalls) === 4, 'Go must not call delegate; NestJS/FastAPI each perform health and synthetic redeem');
-
 d_assert(($probe['probe']['backends'][0]['synthetic_redeem']['reason'] ?? '') === 'backend_disabled_by_production_guard', 'Go synthetic redeem must never execute');
 d_assert(!empty($probe['probe']['backends'][1]['synthetic_redeem']['expected_rejection_observed']), 'NestJS should record expected synthetic rejection');
 d_assert(!empty($probe['probe']['backends'][2]['synthetic_redeem']['expected_rejection_observed']), 'FastAPI should record expected synthetic rejection');

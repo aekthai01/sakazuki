@@ -228,6 +228,61 @@ $businessError = trueMoneyByteIndevProductionRedeemTransport(
 r_assert(!empty($businessError['executed']), 'Non-SUCCESS business responses must pass through unchanged');
 r_assert(($businessError['curl_errno'] ?? -1) === 0, 'Business error must not be rewritten as recipient mismatch');
 
+$integrationHealth = static function (string $url, int $timeout): array {
+    return trueMoneyByteIndevProductionHealthTransport(
+        $url,
+        $timeout,
+        static function (): array {
+            return r_health_ok();
+        }
+    );
+};
+$integrationRedeemOk = static function (string $url, int $timeout) use ($nameHash): array {
+    return trueMoneyByteIndevProductionRedeemTransport(
+        $url,
+        $timeout,
+        static function (): array {
+            return r_redeem_response('SUCCESS');
+        },
+        null,
+        $nameHash
+    );
+};
+$integrationDebug = [];
+$integrationSuccess = redeemAngpaoByteIndev(
+    'https://gift.truemoney.com/campaign/?v=TESTTOKEN123',
+    '0812345678',
+    $integrationDebug,
+    $integrationHealth,
+    $integrationRedeemOk
+);
+r_assert(!empty($integrationSuccess['success']), 'Full adapter flow should succeed for a verified recipient');
+r_assert(abs((float) ($integrationSuccess['amount'] ?? 0) - 10.0) < 0.001, 'Verified adapter flow should preserve the redeemed amount');
+r_assert(($integrationDebug['provider']['selected_backend'] ?? '') === 'nestjs', 'Verified integration flow should keep production backend routing');
+
+$integrationRedeemBad = static function (string $url, int $timeout) use ($nameHash): array {
+    return trueMoneyByteIndevProductionRedeemTransport(
+        $url,
+        $timeout,
+        static function (): array {
+            return r_redeem_response('SUCCESS', '0899999999');
+        },
+        null,
+        $nameHash
+    );
+};
+$blockedDebug = [];
+$integrationBlocked = redeemAngpaoByteIndev(
+    'https://gift.truemoney.com/campaign/?v=TESTTOKEN456',
+    '0812345678',
+    $blockedDebug,
+    $integrationHealth,
+    $integrationRedeemBad
+);
+r_assert(empty($integrationBlocked['success']), 'Full adapter flow must not credit through a recipient mismatch');
+r_assert(!empty($integrationBlocked['indeterminate']), 'Recipient mismatch after SUCCESS must remain indeterminate and non-retriable');
+r_assert(($integrationBlocked['code'] ?? '') === 'provider_indeterminate', 'Recipient mismatch should reuse the existing safe indeterminate path');
+
 if ($failures > 0) {
     fwrite(STDERR, "{$failures} of {$tests} assertions failed\n");
     exit(1);

@@ -1,0 +1,65 @@
+name: Export TrueMoney Upgrade Files
+
+on:
+  push:
+    branches:
+      - export/truemoney-upgrade-files-20260920
+    paths:
+      - ".github/workflows/export-truemoney-upgrade-files.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build export bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p export-root
+          files=(
+            ".github/workflows/truemoney-byteindev-ci.yml"
+            ".github/workflows/truemoney-byteindev-probe.yml"
+            "public_html/includes/truemoney_byteindev.php"
+            "public_html/includes/truemoney_byteindev_route.php"
+            "public_html/user/redeem_angpao.php"
+            "tests/truemoney_byteindev_test.php"
+            "tests/truemoney_byteindev_routing_test.php"
+          )
+          for file in "${files[@]}"; do
+            test -f "$file"
+            mkdir -p "export-root/$(dirname "$file")"
+            cp "$file" "export-root/$file"
+          done
+          cat > export-root/README-TRUEMONEY-UPGRADE.txt <<'EOF'
+          TrueMoney upgrade file bundle from aekthai01/sakazuki
+          Source branch: main
+          Source commit: 1f6fe8833b4c7e7a64196062e13379859aa5ef3d
+
+          Included files:
+          .github/workflows/truemoney-byteindev-ci.yml
+          .github/workflows/truemoney-byteindev-probe.yml
+          public_html/includes/truemoney_byteindev.php
+          public_html/includes/truemoney_byteindev_route.php
+          public_html/user/redeem_angpao.php
+          tests/truemoney_byteindev_test.php
+          tests/truemoney_byteindev_routing_test.php
+
+          One-shot production deployment workflows are intentionally NOT included because they were removed after successful deployment.
+          EOF
+          cd export-root
+          zip -r ../truemoney-upgrade-files.zip .
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: truemoney-upgrade-files
+          path: truemoney-upgrade-files.zip
+          if-no-files-found: error
+          retention-days: 7

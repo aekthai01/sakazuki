@@ -5,6 +5,7 @@ on:
     branches:
       - upgrade/truemoney-byteindev-20260920
       - fix/truemoney-disable-go-20260920
+      - feature/truemoney-recipient-guard-20260920
   workflow_dispatch:
 
 permissions:

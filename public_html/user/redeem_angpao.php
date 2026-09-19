@@ -82,6 +82,7 @@ $tmDebug['configuration'] = [
         return (string) $provider['name'];
     }, trueMoneyByteIndevProviders()),
     'provider_authorization_configured' => false,
+    'recipient_guard_enabled' => true,
     'fee_rate' => (float) TM_FEE_RATE,
     'fee_cap_thb' => (float) TM_FEE_CAP_THB,
 ];
@@ -137,7 +138,8 @@ if (($reservation['mode'] ?? '') === 'resume') {
         (string) $normalized['url'],
         $tmPhone,
         $tmDebug,
-        'trueMoneyByteIndevProductionHealthTransport'
+        'trueMoneyByteIndevProductionHealthTransport',
+        'trueMoneyByteIndevProductionRedeemTransport'
     );
     trueMoneyDebugPersist($tmDebug);
     if (empty($providerResult['success'])) {

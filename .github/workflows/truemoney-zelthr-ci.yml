@@ -74,6 +74,35 @@ jobs:
             exit 1
           fi
 
+      - name: Diagnose Zelthr DNS
+        shell: bash
+        run: |
+          set +e
+          echo '=== runner resolver ==='
+          getent ahosts api.zelthr.rest
+          echo "getent exit=$?"
+
+          echo '=== Python resolver ==='
+          python3 - <<'PY'
+          import socket
+          try:
+              rows = socket.getaddrinfo('api.zelthr.rest', 443, type=socket.SOCK_STREAM)
+              print(sorted({row[4][0] for row in rows}))
+          except Exception as exc:
+              print(type(exc).__name__ + ': ' + str(exc))
+          PY
+
+          echo '=== Google DNS over HTTPS ==='
+          curl --silent --show-error --connect-timeout 10 --max-time 20 \
+            'https://dns.google/resolve?name=api.zelthr.rest&type=A' || true
+          echo
+
+          echo '=== Cloudflare DNS over HTTPS ==='
+          curl --silent --show-error --connect-timeout 10 --max-time 20 \
+            --header 'accept: application/dns-json' \
+            'https://cloudflare-dns.com/dns-query?name=api.zelthr.rest&type=A' || true
+          echo
+
       - name: Live smoke test Zelthr with fake voucher
         shell: bash
         run: |

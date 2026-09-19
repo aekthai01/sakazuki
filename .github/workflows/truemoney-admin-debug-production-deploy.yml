@@ -1,0 +1,185 @@
+name: TrueMoney Admin Debug Production Deploy
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "public_html/admin/truemoney_debug.php"
+      - "public_html/includes/truemoney_byteindev_debug.php"
+      - ".github/workflows/truemoney-admin-debug-production-deploy.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test-backup-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      FTP_HOST: svth01.inwcloud.shop
+      FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
+      FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+      FTP_REMOTE_DIR: public_html
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: curl, json, mbstring, mysqli
+          coverage: none
+
+      - name: Validate deploy inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in FTP_USERNAME FTP_PASSWORD; do
+            if [ -z "${!name:-}" ]; then
+              echo "Missing required secret: $name"
+              exit 1
+            fi
+          done
+          test -f public_html/admin/truemoney_debug.php
+          test -f public_html/includes/truemoney_byteindev_debug.php
+          test -f public_html/includes/truemoney_byteindev.php
+          test -f public_html/includes/truemoney_byteindev_route.php
+          test -f tests/truemoney_byteindev_test.php
+          test -f tests/truemoney_byteindev_routing_test.php
+          test -f tests/truemoney_byteindev_debug_test.php
+
+      - name: Run TrueMoney diagnostics regression tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          php -l public_html/admin/truemoney_debug.php
+          php -l public_html/includes/truemoney_byteindev_debug.php
+          php -l tests/truemoney_byteindev_debug_test.php
+          php tests/truemoney_byteindev_test.php
+          php tests/truemoney_byteindev_routing_test.php
+          php tests/truemoney_byteindev_debug_test.php
+
+      - name: Lint all production PHP
+        shell: bash
+        run: |
+          set -euo pipefail
+          failures=0
+          count=0
+          while IFS= read -r -d '' file; do
+            count=$((count + 1))
+            if ! php -l "$file" >/tmp/php-lint.out 2>&1; then
+              cat /tmp/php-lint.out
+              failures=$((failures + 1))
+            fi
+          done < <(find public_html -type f -name '*.php' -print0)
+          echo "PHP files checked: $count"
+          if [ "$failures" -ne 0 ]; then
+            echo "PHP syntax failures: $failures"
+            exit 1
+          fi
+
+      - name: Live probe current TrueMoney backends
+        shell: bash
+        run: |
+          set -euo pipefail
+          fake_code='SAKAZUKI_ADMIN_DEBUG_DEPLOY_INVALID_VOUCHER'
+          phone='0812345678'
+          for base in https://truemoney-voucher-nestjs.vercel.app https://truemoney-voucher-fastapi.vercel.app; do
+            echo "Probing ${base}"
+            status_http="$(curl --silent --show-error --connect-timeout 10 --max-time 30 --output /tmp/status.out --write-out '%{http_code}' "${base}/status")"
+            test "$status_http" -ge 200 && test "$status_http" -lt 300
+            redeem_http="$(curl --silent --show-error --connect-timeout 10 --max-time 40 --output /tmp/redeem.json --write-out '%{http_code}' "${base}/truemoney/${fake_code}/${phone}")"
+            test "$redeem_http" -ge 200 && test "$redeem_http" -lt 500
+            python3 - <<'PY'
+          import json
+          from pathlib import Path
+          payload = json.loads(Path('/tmp/redeem.json').read_text(errors='replace'))
+          if not isinstance(payload, dict):
+              raise SystemExit('response is not JSON object')
+          status = payload.get('status')
+          if isinstance(status, dict) and status.get('code') == 'SUCCESS':
+              raise SystemExit('synthetic voucher unexpectedly succeeded')
+          if not isinstance(status, dict) and 'code' not in payload:
+              raise SystemExit('unrecognized provider response')
+          print('recognized synthetic rejection')
+          PY
+          done
+
+      - name: Backup current production admin debug
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p backup deploy-result
+          base="ftp://${FTP_HOST}/${FTP_REMOTE_DIR}"
+          curl --silent --show-error --fail --connect-timeout 15 --max-time 60 \
+            --user "$FTP_USERNAME:$FTP_PASSWORD" \
+            "${base}/admin/truemoney_debug.php" \
+            --output backup/truemoney_debug.php
+          if curl --silent --show-error --fail --connect-timeout 15 --max-time 60 \
+            --user "$FTP_USERNAME:$FTP_PASSWORD" \
+            "${base}/includes/truemoney_byteindev_debug.php" \
+            --output backup/truemoney_byteindev_debug.php; then
+            echo "Existing debug include backed up"
+          else
+            rm -f backup/truemoney_byteindev_debug.php
+            echo "No existing debug include; expected for first deploy"
+          fi
+          sha256sum backup/truemoney_debug.php > backup/sha256sums.txt
+          if [ -f backup/truemoney_byteindev_debug.php ]; then
+            sha256sum backup/truemoney_byteindev_debug.php >> backup/sha256sums.txt
+          fi
+          printf 'Commit before deploy: %s\n' "$GITHUB_SHA" > backup/manifest.txt
+
+      - name: Deploy diagnostic include first
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="ftp://${FTP_HOST}/${FTP_REMOTE_DIR}"
+          curl --silent --show-error --fail --connect-timeout 15 --max-time 60 \
+            --user "$FTP_USERNAME:$FTP_PASSWORD" \
+            --ftp-create-dirs \
+            --upload-file public_html/includes/truemoney_byteindev_debug.php \
+            "${base}/includes/truemoney_byteindev_debug.php"
+
+      - name: Deploy admin debug page
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="ftp://${FTP_HOST}/${FTP_REMOTE_DIR}"
+          curl --silent --show-error --fail --connect-timeout 15 --max-time 60 \
+            --user "$FTP_USERNAME:$FTP_PASSWORD" \
+            --upload-file public_html/admin/truemoney_debug.php \
+            "${base}/admin/truemoney_debug.php"
+
+      - name: Verify deployed files byte-for-byte
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="ftp://${FTP_HOST}/${FTP_REMOTE_DIR}"
+          mkdir -p /tmp/deployed
+          curl --silent --show-error --fail --connect-timeout 15 --max-time 60 \
+            --user "$FTP_USERNAME:$FTP_PASSWORD" \
+            "${base}/includes/truemoney_byteindev_debug.php" \
+            --output /tmp/deployed/truemoney_byteindev_debug.php
+          curl --silent --show-error --fail --connect-timeout 15 --max-time 60 \
+            --user "$FTP_USERNAME:$FTP_PASSWORD" \
+            "${base}/admin/truemoney_debug.php" \
+            --output /tmp/deployed/truemoney_debug.php
+          cmp public_html/includes/truemoney_byteindev_debug.php /tmp/deployed/truemoney_byteindev_debug.php
+          cmp public_html/admin/truemoney_debug.php /tmp/deployed/truemoney_debug.php
+          sha256sum /tmp/deployed/truemoney_byteindev_debug.php /tmp/deployed/truemoney_debug.php > deploy-result/production-sha256sums.txt
+          printf 'Commit: %s\nVerified byte-for-byte: yes\n' "$GITHUB_SHA" > deploy-result/summary.txt
+
+      - name: Upload backup and deploy evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: truemoney-admin-debug-production-${{ github.run_id }}
+          path: |
+            backup/
+            deploy-result/
+          if-no-files-found: warn
+          retention-days: 14

@@ -3,7 +3,7 @@ name: SlipVerify Nearby CI
 on:
   push:
     branches:
-      - fix/slipverify-api-key-20260924
+      - fix/slipverify-use-store-receiver-20260924
   pull_request:
     paths:
       - "public_html/includes/slip_nearby.php"
@@ -38,6 +38,19 @@ jobs:
           php -l public_html/includes/slip_nearby.php
           php -l public_html/admin/slipverify.php
           php -l tests/slip_nearby_test.php
+
+      - name: Guard single receiver source of truth
+        shell: bash
+        run: |
+          set -euo pipefail
+          file="public_html/admin/slipverify.php"
+          grep -q "getSetting('easyslip_receiver_name'" "$file"
+          grep -q "getSetting('easyslip_account_number'" "$file"
+          grep -q "getSetting('easyslip_bank_name'" "$file"
+          if grep -Eq "slipverify_nearby_(receiver_name|bank_code|account_no)" "$file"; then
+            echo "SlipVerify admin must not create a second receiver settings source."
+            exit 1
+          fi
 
       - name: Run SlipVerify API-key contract tests
         shell: bash

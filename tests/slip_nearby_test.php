@@ -1,4 +1,38 @@
 <?php
+$GLOBALS['nearby_test_settings'] = [];
+$GLOBALS['nearby_test_easyslip_calls'] = [];
+
+function getSetting($key, $default = '')
+{
+    return array_key_exists((string) $key, $GLOBALS['nearby_test_settings'])
+        ? $GLOBALS['nearby_test_settings'][(string) $key]
+        : $default;
+}
+
+function verifySlipWithEasyslip($imageBase64, string $remark = '', array $debugContext = []): array
+{
+    $GLOBALS['nearby_test_easyslip_calls'][] = [
+        'image' => $imageBase64,
+        'remark' => $remark,
+        'debug' => $debugContext,
+    ];
+    return [
+        'success' => true,
+        'data' => [
+            'transaction_ref' => 'easy-ref',
+            'amount' => 1.0,
+            'transfer_date' => '2026-09-24T00:00:00+00:00',
+            'sender_name' => 'sender',
+            'sender_account' => '1111',
+            'receiver_name' => 'receiver',
+            'receiver_account' => '2222',
+            'bank_code' => '014',
+            'verification_remark' => $remark,
+            'is_duplicate' => false,
+        ],
+    ];
+}
+
 require_once __DIR__ . '/../public_html/includes/slip_nearby.php';
 
 $tests = 0;
@@ -66,6 +100,8 @@ n_assert(($result['data']['transaction_ref'] ?? '') === '202609031200183310899',
 n_assert(($result['data']['amount'] ?? null) === 100.0, 'amount should be normalized as decimal');
 n_assert(($result['data']['receiver_account'] ?? '') === '067-8-xxx346', 'receiver details.account_no should be accepted');
 n_assert(($result['data']['sender_bank_code'] ?? '') === '014', 'sender bank code should be preserved');
+n_assert(($result['data']['bank_code'] ?? '') === '014', 'main deposit bank_code should use sending bank code');
+n_assert(array_key_exists('is_duplicate', $result['data']) && $result['data']['is_duplicate'] === false, 'Nearby success should not invent a provider duplicate decision');
 
 $bad = $fixture;
 unset($bad['data']['date_time']);
@@ -124,7 +160,7 @@ $result = nearbySlipVerifyV2($apiKey, 'bytes', 'image/jpeg', [], 5000, static fn
     'status' => 'error', 'code' => 'DUPLICATE_SLIP', 'message' => 'duplicate'
 ], 400));
 n_assert(($result['provider_code'] ?? '') === 'DUPLICATE_SLIP', 'duplicate provider code should be preserved');
-n_assert(empty($result['retryable']), 'duplicate slip should not be retryable');
+n_assert(empty($result['retryable']), 'provider duplicate response should not be retried automatically');
 
 $result = nearbySlipVerifyV2($apiKey, 'bytes', 'image/jpeg', [], 5000, static fn() => n_http([
     'status' => 'error', 'message' => 'busy'
@@ -143,8 +179,9 @@ $result = nearbySlipVerifyV2($apiKey, 'bytes', 'image/jpeg', [], 5000, static fu
         'duration_ms' => 5000,
     ];
 });
-n_assert(empty($result['success']) && !empty($result['retryable']), 'timeout should be retryable');
-n_assert(($result['error_code'] ?? '') === 'provider_timeout', 'timeout should be classified explicitly');
+n_assert(empty($result['success']) && !empty($result['pending']), 'timeout after submission should be held as ambiguous');
+n_assert(empty($result['retryable']), 'ambiguous timeout must not be automatically resent');
+n_assert(($result['error_code'] ?? '') === 'provider_outcome_unknown', 'timeout should use the durable main-flow ambiguity code');
 
 $result = nearbySlipVerifyV2($apiKey, 'bytes', 'image/jpeg', [], 5000, static function (): array {
     return [
@@ -157,7 +194,8 @@ $result = nearbySlipVerifyV2($apiKey, 'bytes', 'image/jpeg', [], 5000, static fu
         'duration_ms' => 5,
     ];
 });
-n_assert(empty($result['success']) && ($result['error_code'] ?? '') === 'provider_invalid_response', 'invalid JSON must fail closed');
+n_assert(empty($result['success']) && !empty($result['pending']), 'invalid HTTP 200 JSON is an ambiguous submitted request');
+n_assert(($result['error_code'] ?? '') === 'provider_outcome_unknown', 'invalid HTTP 200 JSON should not invite an automatic resend');
 
 $result = nearbySlipVerifyV2($apiKey, 'bytes', 'image/jpeg', [], 5000, static function (): array {
     return [
@@ -170,7 +208,55 @@ $result = nearbySlipVerifyV2($apiKey, 'bytes', 'image/jpeg', [], 5000, static fu
         'duration_ms' => 5,
     ];
 });
-n_assert(empty($result['success']) && ($result['error_code'] ?? '') === 'provider_response_too_large', 'oversized provider response must be rejected');
+n_assert(empty($result['success']) && !empty($result['pending']), 'oversized provider response after submission is ambiguous');
+n_assert(($result['error_code'] ?? '') === 'provider_outcome_unknown', 'oversized provider response should not be resent automatically');
+
+$pngDataUri = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+$decodedImage = nearbySlipDecodeBase64Image($pngDataUri);
+n_assert(!empty($decodedImage['success']), 'main-flow data URI should decode');
+n_assert(($decodedImage['mime'] ?? '') === 'image/png', 'decoded MIME should come from bytes');
+
+$base64Calls = [];
+$result = nearbySlipVerifyBase64(
+    $apiKey,
+    $pngDataUri,
+    ['expected_receiver_name' => 'นาย สมชาย ใจดี', 'expected_account_no' => '346'],
+    6000,
+    static function (string $receivedKey, string $image, string $mime, array $options, int $timeout) use (&$base64Calls, $fixture): array {
+        $base64Calls[] = compact('receivedKey', 'image', 'mime', 'options', 'timeout');
+        return n_http($fixture, 200, 12);
+    }
+);
+n_assert(!empty($result['success']), 'base64 main-flow helper should delegate to v2');
+n_assert(count($base64Calls) === 1 && ($base64Calls[0]['mime'] ?? '') === 'image/png', 'base64 helper should pass detected image MIME');
+n_assert(($base64Calls[0]['options']['expected_account_no'] ?? '') === '346', 'base64 helper should preserve validated receiver options');
+
+$result = nearbySlipVerifyBase64($apiKey, 'not-base64***', [], 5000, static fn() => n_http($fixture));
+n_assert(empty($result['success']) && ($result['error_code'] ?? '') === 'invalid_image_payload', 'invalid base64 should fail before transport');
+
+// Provider selection must be explicit, conservative, and reuse the one store account source.
+$GLOBALS['nearby_test_settings'] = [];
+n_assert(slipVerificationConfiguredProvider() === 'easyslip', 'missing provider setting must preserve EasySlip as the safe default');
+$GLOBALS['nearby_test_settings']['slip_verification_provider'] = 'unknown';
+n_assert(slipVerificationConfiguredProvider() === 'easyslip', 'unknown provider setting must fall back to EasySlip');
+$GLOBALS['nearby_test_settings']['slip_verification_provider'] = 'nearby';
+n_assert(slipVerificationConfiguredProvider() === 'nearby', 'Nearby provider setting should be recognized');
+$GLOBALS['nearby_test_settings']['easyslip_receiver_name'] = 'นาย อัครชัย แจ้งกระจ่าง';
+$GLOBALS['nearby_test_settings']['easyslip_receiver_name_en'] = 'Akkarachai';
+$GLOBALS['nearby_test_settings']['easyslip_account_number'] = '6798475698';
+$GLOBALS['nearby_test_settings']['easyslip_bank_name'] = 'กรุงไทย';
+$receiverOptions = nearbySlipConfiguredReceiverOptions();
+n_assert(($receiverOptions['expected_receiver_name'] ?? '') === 'นาย อัครชัย แจ้งกระจ่าง', 'Nearby must reuse the existing Thai receiver name');
+n_assert(($receiverOptions['expected_account_no'] ?? '') === '6798475698', 'Nearby must reuse the existing store account number');
+n_assert(!isset($receiverOptions['expected_bank_code']), 'Nearby must not guess a bank code from the stored display name');
+
+$GLOBALS['nearby_test_settings']['slip_verification_provider'] = 'easyslip';
+$GLOBALS['nearby_test_easyslip_calls'] = [];
+$routerResult = verifySlipWithConfiguredProvider('data:image/png;base64,ZmFrZQ==', 'ez2:test', ['attempt_uuid' => 'attempt-test']);
+n_assert(!empty($routerResult['success']), 'configured provider router should preserve the EasySlip path');
+n_assert(($routerResult['provider'] ?? '') === 'easyslip', 'EasySlip route should identify its provider');
+n_assert(count($GLOBALS['nearby_test_easyslip_calls']) === 1, 'EasySlip router path should make exactly one provider call');
+n_assert(($GLOBALS['nearby_test_easyslip_calls'][0]['remark'] ?? '') === 'ez2:test', 'router must preserve the signed verification remark for EasySlip');
 
 if ($failures > 0) {
     fwrite(STDERR, "{$failures} of {$tests} assertions failed\n");

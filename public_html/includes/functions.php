@@ -9,6 +9,7 @@ require_once __DIR__ . '/commerce_center.php';
 require_once __DIR__ . '/commerce_context.php';
 require_once __DIR__ . '/transaction_integrity.php';
 require_once __DIR__ . '/slip_debug.php';
+require_once __DIR__ . '/slip_nearby.php';
 require_once __DIR__ . '/product_image_lifecycle.php';
 
 
@@ -10234,7 +10235,7 @@ function processSlipDeposit($userId, $imageBase64, string $requestedAttemptUuid 
                     'clock' => slipDebugClockSnapshot(),
                 ],
             ]);
-            $diagnosticResult = verifySlipWithEasyslip($imageBase64, $verificationRemark, [
+            $diagnosticResult = verifySlipWithConfiguredProvider($imageBase64, $verificationRemark, [
                 'attempt_uuid' => $attemptId,
                 'slip_hash' => $slipHash,
                 'user_id' => $userId,
@@ -10343,7 +10344,7 @@ function processSlipDeposit($userId, $imageBase64, string $requestedAttemptUuid 
         ];
     }
 
-    $verification = verifySlipWithEasyslip($imageBase64, $verificationRemark, [
+    $verification = verifySlipWithConfiguredProvider($imageBase64, $verificationRemark, [
         'attempt_uuid' => $attemptId,
         'slip_hash' => $slipHash,
         'user_id' => $userId,

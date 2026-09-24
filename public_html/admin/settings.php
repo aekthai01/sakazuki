@@ -545,7 +545,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     // Handle EasySlip settings update
     elseif ($action === 'update_easyslip') {
         $esEnabled = settingsPostString('easyslip_enabled') === '1';
+        $esProvider = strtolower(trim(settingsPostString('slip_verification_provider', 'easyslip')));
         $esApiKey = trim(settingsPostString('easyslip_api_key'));
+        $nearbyApiKey = trim(settingsPostString('slipverify_nearby_api_key'));
         $esReceiverNameTh = trim(cleanInput(settingsPostString('easyslip_receiver_name_th')));
         $esReceiverNameEn = trim(cleanInput(settingsPostString('easyslip_receiver_name_en')));
         $esPhone = trim(cleanInput(settingsPostString('easyslip_phone')));
@@ -554,6 +556,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $esBankNameEn = trim(cleanInput(settingsPostString('easyslip_bank_name_en')));
         $esMaxAgeMinutes = filter_var(settingsPostString('easyslip_max_age_minutes', '1440'), FILTER_VALIDATE_INT);
         $existingEasySlipApiKey = trim((string) (getSetting('easyslip_api_key') ?? ''));
+        $existingNearbyApiKey = trim((string) (getSetting('slipverify_nearby_api_key') ?? ''));
 
         $esPhoneDigits = preg_replace('/\D+/', '', $esPhone);
         $esAccountStored = trim(preg_replace('/[^0-9\s-]+/', '', $esAccountNumber));
@@ -564,10 +567,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $bankNameThLength = function_exists('mb_strlen') ? mb_strlen($esBankNameTh, 'UTF-8') : strlen($esBankNameTh);
         $bankNameEnLength = function_exists('mb_strlen') ? mb_strlen($esBankNameEn, 'UTF-8') : strlen($esBankNameEn);
 
-        if ($esEnabled && $esApiKey === '' && $existingEasySlipApiKey === '') {
+        if (!in_array($esProvider, ['easyslip', 'nearby'], true)) {
+            $error = getAppLang() === 'en'
+                ? 'Invalid bank-slip verification provider.'
+                : 'ผู้ให้บริการตรวจสอบสลิปไม่ถูกต้อง';
+        } elseif ($esEnabled && $esProvider === 'easyslip' && $esApiKey === '' && $existingEasySlipApiKey === '') {
             $error = Lang::t('admin.settings.error.easyslip_key_required');
+        } elseif ($esEnabled && $esProvider === 'nearby' && $nearbyApiKey === '' && $existingNearbyApiKey === '') {
+            $error = getAppLang() === 'en'
+                ? 'xNearby SlipVerify API key is required when xNearby is selected.'
+                : 'กรุณากรอก xNearby SlipVerify API Key เมื่อเลือกใช้ xNearby';
         } elseif ($esApiKey !== '' && (strlen($esApiKey) < 10 || strlen($esApiKey) > 512 || preg_match('/[\x00-\x1F\x7F]/', $esApiKey))) {
             $error = Lang::t('admin.settings.error.easyslip_key');
+        } elseif ($nearbyApiKey !== '' && (strlen($nearbyApiKey) < 12 || strlen($nearbyApiKey) > 512 || preg_match('/[\x00-\x20\x7F]/', $nearbyApiKey))) {
+            $error = getAppLang() === 'en'
+                ? 'xNearby SlipVerify API key format is invalid.'
+                : 'รูปแบบ xNearby SlipVerify API Key ไม่ถูกต้อง';
         } elseif ($esEnabled && $esPhoneDigits === '' && $esAccountDigits === '') {
             $error = Lang::t('admin.settings.error.receiver_account');
         } elseif ($esEnabled && $esReceiverNameTh === '' && $esReceiverNameEn === '') {
@@ -587,6 +602,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             try {
                 $writes = [
                     ['easyslip_enabled', $esEnabled ? '1' : '0'],
+                    ['slip_verification_provider', $esProvider],
                     ['easyslip_receiver_name', $esReceiverNameTh],
                     ['easyslip_receiver_name_en', $esReceiverNameEn],
                     ['easyslip_phone', $esPhoneDigits],
@@ -598,14 +614,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if ($esApiKey !== '') {
                     $writes[] = ['easyslip_api_key', $esApiKey];
                 }
+                if ($nearbyApiKey !== '') {
+                    $writes[] = ['slipverify_nearby_api_key', $nearbyApiKey];
+                }
+                // Legacy JWT/Bearer auth is retired by xNearby; keep stale tokens inert.
+                $writes[] = ['slipverify_nearby_access_token', ''];
                 foreach ($writes as $write) {
                     if (!upsertSetting($write[0], $write[1])) {
                         throw new RuntimeException('Unable to save setting: ' . $write[0]);
                     }
                 }
                 $conn->commit();
-                $success = Lang::t('admin.settings.success.easyslip');
-                logHistory($_SESSION['user_id'], 'update_easyslip', 'Updated EasySlip API and receiver settings');
+                $success = getAppLang() === 'en'
+                    ? 'Bank-slip verification settings updated.'
+                    : 'บันทึกการตั้งค่าตรวจสอบสลิปแล้ว';
+                logHistory($_SESSION['user_id'], 'update_bank_slip_verification', 'Updated bank-slip provider, credentials, and shared receiver settings');
             } catch (Throwable $e) {
                 $conn->rollback();
                 error_log('EasySlip settings update failed: ' . $e->getMessage());
@@ -1691,11 +1714,11 @@ $csrfFieldHtml = csrfField();
                             </button>
                         </form>
 
-                        <!-- EasySlip API Settings -->
+                        <!-- Bank Slip Verification Settings -->
                         <div class="border-t border-green-500/30 my-6"></div>
-                        <h6 class="mb-4 text-green-300 font-semibold flex items-center gap-2" data-lang="admin.settings.easyslip_title">
+                        <h6 class="mb-4 text-green-300 font-semibold flex items-center gap-2">
                             <i class="bi bi-receipt-cutoff text-green-400"></i>
-                            <?php echo Lang::t('admin.settings.easyslip_title'); ?>
+                            <?php echo $currentLang === 'en' ? 'Bank Slip Verification' : 'ตรวจสอบสลิปธนาคาร'; ?>
                         </h6>
                         <form method="POST" class="space-y-4">
                             <?php echo $csrfFieldHtml; ?>
@@ -1708,16 +1731,47 @@ $csrfFieldHtml = csrfField();
                                            class="sr-only peer">
                                     <div class="w-11 h-6 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-green-500"></div>
                                 </label>
-                                <span class="text-gray-300" data-lang="admin.settings.easyslip_enabled"><?php echo Lang::t('admin.settings.easyslip_enabled'); ?></span>
+                                <span class="text-gray-300"><?php echo $currentLang === 'en' ? 'Enable bank-slip verification' : 'เปิดระบบตรวจสอบสลิปธนาคาร'; ?></span>
+                            </div>
+
+
+                            <div>
+                                <label class="text-gray-400 text-sm mb-2 block">
+                                    <?php echo $currentLang === 'en' ? 'Verification provider' : 'ผู้ให้บริการตรวจสอบสลิป'; ?>
+                                </label>
+                                <?php $slipProvider = strtolower(trim((string) getSetting('slip_verification_provider', 'easyslip'))); ?>
+                                <select name="slip_verification_provider"
+                                        class="glass border border-green-500/30 rounded-lg p-2 w-full bg-transparent text-white">
+                                    <option value="easyslip" <?php echo $slipProvider !== 'nearby' ? 'selected' : ''; ?>>EasySlip</option>
+                                    <option value="nearby" <?php echo $slipProvider === 'nearby' ? 'selected' : ''; ?>>xNearby SlipVerify v2</option>
+                                </select>
+                                <small class="text-gray-500 text-xs">
+                                    <?php echo $currentLang === 'en'
+                                        ? 'Both providers use the same receiver name and bank account configured below.'
+                                        : 'ทั้งสองผู้ให้บริการใช้ชื่อผู้รับและบัญชีธนาคารชุดเดียวกันที่ตั้งไว้ด้านล่าง'; ?>
+                                </small>
                             </div>
 
                             <div>
-                                <label class="text-gray-400 text-sm mb-2 block" data-lang="admin.settings.api_key"><?php echo Lang::t('admin.settings.api_key'); ?></label>
+                                <label class="text-gray-400 text-sm mb-2 block">EasySlip API Key</label>
                                 <input type="password" name="easyslip_api_key"
                                        class="glass border border-green-500/30 rounded-lg p-2 w-full bg-transparent text-white font-mono text-sm"
                                        value="" autocomplete="new-password"
                                        placeholder="<?php echo htmlspecialchars(Lang::t('admin.settings.keep_api_key_placeholder'), ENT_QUOTES, 'UTF-8'); ?>" data-lang-placeholder="admin.settings.keep_api_key_placeholder">
                                 <small class="text-gray-500 text-xs" data-lang="admin.settings.easyslip_api_hint"><?php echo Lang::t('admin.settings.easyslip_api_hint'); ?></small>
+                            </div>
+
+                            <div>
+                                <label class="text-gray-400 text-sm mb-2 block">xNearby SlipVerify API Key</label>
+                                <input type="password" name="slipverify_nearby_api_key"
+                                       class="glass border border-green-500/30 rounded-lg p-2 w-full bg-transparent text-white font-mono text-sm"
+                                       value="" autocomplete="new-password"
+                                       placeholder="<?php echo $currentLang === 'en' ? 'Leave blank to keep the current API key' : 'เว้นว่างเพื่อใช้ API Key เดิม'; ?>">
+                                <small class="text-gray-500 text-xs">
+                                    <?php echo $currentLang === 'en'
+                                        ? 'Uses X-API-Key with xNearby SlipVerify v2. Legacy Bearer/JWT tokens are not used.'
+                                        : 'ใช้ X-API-Key กับ xNearby SlipVerify v2 และไม่ใช้ Bearer/JWT แบบเก่า'; ?>
+                                </small>
                             </div>
 
                             <div>

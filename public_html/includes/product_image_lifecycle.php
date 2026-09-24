@@ -39,17 +39,20 @@ if (!function_exists('sakazukiManagedProductImageFilesystemPath')) {
 }
 
 if (!function_exists('sakazukiProductImageCountQuery')) {
-    function sakazukiProductImageCountQuery(mysqli $conn, string $sql, string $path, bool $bindTwice = false): ?int
+    /** @param list<string> $paths */
+    function sakazukiProductImageCountQuery(mysqli $conn, string $sql, array $paths): ?int
     {
         try {
+            if ($paths === []) return null;
             $stmt = $conn->prepare($sql);
             if (!$stmt) return null;
-            $a = $path;
-            if ($bindTwice) {
-                $b = $path;
-                $stmt->bind_param('ss', $a, $b);
-            } else {
-                $stmt->bind_param('s', $a);
+            $types = str_repeat('s', count($paths));
+            $values = array_values($paths);
+            $bind = [$types];
+            foreach ($values as $index => $value) $bind[] = &$values[$index];
+            if (!call_user_func_array([$stmt, 'bind_param'], $bind)) {
+                $stmt->close();
+                return null;
             }
             if (!$stmt->execute()) {
                 $stmt->close();
@@ -74,10 +77,11 @@ if (!function_exists('sakazukiProductImageReferenceCount')) {
         if ($relative === '') return 0;
         if (!isset($conn) || !($conn instanceof mysqli)) return null;
 
+        $legacyRelative = '/' . $relative;
         $total = sakazukiProductImageCountQuery(
             $conn,
-            'SELECT COUNT(*) FROM products WHERE image=?',
-            $relative
+            'SELECT COUNT(*) FROM products WHERE image=? OR image=?',
+            [$relative, $legacyRelative]
         );
         if ($total === null) return null;
 
@@ -85,9 +89,8 @@ if (!function_exists('sakazukiProductImageReferenceCount')) {
             && sakazukiTableColumnsReady('cgo_products', ['image_path', 'cached_image_path'])) {
             $count = sakazukiProductImageCountQuery(
                 $conn,
-                'SELECT COUNT(*) FROM cgo_products WHERE image_path=? OR cached_image_path=?',
-                $relative,
-                true
+                'SELECT COUNT(*) FROM cgo_products WHERE image_path=? OR image_path=? OR cached_image_path=? OR cached_image_path=?',
+                [$relative, $legacyRelative, $relative, $legacyRelative]
             );
             if ($count === null) return null;
             $total += $count;
@@ -97,8 +100,8 @@ if (!function_exists('sakazukiProductImageReferenceCount')) {
             && sakazukiTableColumnsReady('supplier_products', ['image_url'])) {
             $count = sakazukiProductImageCountQuery(
                 $conn,
-                'SELECT COUNT(*) FROM supplier_products WHERE image_url=?',
-                $relative
+                'SELECT COUNT(*) FROM supplier_products WHERE image_url=? OR image_url=?',
+                [$relative, $legacyRelative]
             );
             if ($count === null) return null;
             $total += $count;
@@ -319,12 +322,10 @@ if (!function_exists('sakazukiCleanupOrphanedProductImages')) {
             }
 
             $candidates++;
-            $deleteResult = sakazukiDeleteManagedProductImageIfUnreferenced(
-                $relative,
-                static function (string $candidate) use ($references): int {
-                    return isset($references[$candidate]) ? 1 : 0;
-                }
-            );
+            // The snapshot above is only a cheap candidate filter. Re-query
+            // live database references immediately before unlinking so a sync or
+            // admin request cannot attach this old file between scan and delete.
+            $deleteResult = sakazukiDeleteManagedProductImageIfUnreferenced($relative);
             if (!empty($deleteResult['deleted'])) {
                 $deleted++;
                 $freedBytes += max(0, (int) ($deleteResult['bytes'] ?? 0));

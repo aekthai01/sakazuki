@@ -20,11 +20,29 @@ function slipVerifyAdminPostString(string $key, string $default = ''): string
     return (string) $_POST[$key];
 }
 
-function slipVerifyAdminCleanText(string $value, int $maxLength = 255): string
+/**
+ * Nearby must use the same receiver configuration as the existing slip system.
+ * This keeps one source of truth: Admin > Settings > EasySlip / store bank account.
+ */
+function slipVerifyAdminStoreReceiverConfig(): array
 {
-    $value = trim($value);
-    if ($value === '' || strlen($value) > $maxLength || preg_match('/[\x00-\x1F\x7F]/', $value)) return '';
-    return $value;
+    $nameTh = trim((string) getSetting('easyslip_receiver_name', ''));
+    $nameEn = trim((string) getSetting('easyslip_receiver_name_en', ''));
+    $account = trim((string) getSetting('easyslip_account_number', ''));
+    $phone = trim((string) getSetting('easyslip_phone', ''));
+    $bankTh = trim((string) getSetting('easyslip_bank_name', ''));
+    $bankEn = trim((string) getSetting('easyslip_bank_name_en', ''));
+
+    return [
+        'receiver_name' => $nameTh !== '' ? $nameTh : $nameEn,
+        'receiver_name_th' => $nameTh,
+        'receiver_name_en' => $nameEn,
+        'account_number' => $account,
+        'phone' => $phone,
+        'bank_name' => $bankTh !== '' ? $bankTh : $bankEn,
+        'bank_name_th' => $bankTh,
+        'bank_name_en' => $bankEn,
+    ];
 }
 
 function slipVerifyAdminReadImage(): array
@@ -60,7 +78,13 @@ function slipVerifyAdminReadImage(): array
     if (!in_array($mime, ['image/jpeg', 'image/png', 'image/webp'], true)) {
         return ['success' => false, 'message' => 'รองรับเฉพาะ JPEG, PNG และ WebP'];
     }
-    return ['success' => true, 'bytes' => $bytes, 'mime' => $mime, 'sha256' => hash('sha256', $bytes), 'size' => strlen($bytes)];
+    return [
+        'success' => true,
+        'bytes' => $bytes,
+        'mime' => $mime,
+        'sha256' => hash('sha256', $bytes),
+        'size' => strlen($bytes),
+    ];
 }
 
 if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
@@ -69,18 +93,11 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
 
     if ($action === 'save_nearby_settings') {
         $submittedApiKey = nearbySlipValidateApiKey(slipVerifyAdminPostString('nearby_api_key'));
-        $receiverName = slipVerifyAdminCleanText(slipVerifyAdminPostString('nearby_receiver_name'), 150);
-        $bankCode = slipVerifyAdminCleanText(slipVerifyAdminPostString('nearby_bank_code'), 32);
-        $accountNo = slipVerifyAdminCleanText(slipVerifyAdminPostString('nearby_account_no'), 100);
         $existingApiKey = nearbySlipValidateApiKey((string) getSetting('slipverify_nearby_api_key', ''));
         $effectiveApiKey = $submittedApiKey !== '' ? $submittedApiKey : $existingApiKey;
 
         if ($effectiveApiKey === '') {
             $error = $isTh ? 'กรุณาใส่ SlipVerify API Key ก่อนบันทึก' : 'Enter a SlipVerify API key before saving.';
-        } elseif ($bankCode !== '' && !preg_match('/^[A-Za-z0-9_-]{2,32}$/D', $bankCode)) {
-            $error = $isTh ? 'รหัสธนาคารต้องเป็นตัวเลข/ตัวอักษร เช่น 004 หรือ KBANK' : 'Bank code must look like 004 or KBANK.';
-        } elseif ($accountNo !== '' && strlen(preg_replace('/\D+/', '', $accountNo)) < 3) {
-            $error = $isTh ? 'เลขบัญชีสำหรับตรวจผู้รับสั้นเกินไป' : 'Receiver account check is too short.';
         } else {
             global $conn;
             $conn->begin_transaction();
@@ -88,17 +105,14 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
                 if ($submittedApiKey !== '' && !upsertSetting('slipverify_nearby_api_key', $submittedApiKey)) {
                     throw new RuntimeException('Unable to save SlipVerify API key');
                 }
-                foreach ([
-                    ['slipverify_nearby_receiver_name', $receiverName],
-                    ['slipverify_nearby_bank_code', strtoupper($bankCode)],
-                    ['slipverify_nearby_account_no', $accountNo],
-                    ['slipverify_nearby_token', ''],
-                ] as $write) {
-                    if (!upsertSetting($write[0], $write[1])) throw new RuntimeException('Unable to save SlipVerify setting');
+                if (!upsertSetting('slipverify_nearby_token', '')) {
+                    throw new RuntimeException('Unable to clear legacy SlipVerify token');
                 }
                 $conn->commit();
-                $success = $isTh ? 'บันทึก SlipVerify API Key และข้อมูลตรวจผู้รับแล้ว' : 'SlipVerify API key and receiver checks saved.';
-                logHistory((int) $_SESSION['user_id'], 'update_slipverify_nearby', 'Updated SlipVerify Nearby API key settings');
+                $success = $isTh
+                    ? 'บันทึก SlipVerify API Key แล้ว ข้อมูลผู้รับจะใช้ค่าบัญชีร้านเดิมอัตโนมัติ'
+                    : 'SlipVerify API key saved. Receiver validation uses the existing store account automatically.';
+                logHistory((int) $_SESSION['user_id'], 'update_slipverify_nearby', 'Updated SlipVerify Nearby API key; receiver settings use store source of truth');
             } catch (Throwable $e) {
                 $conn->rollback();
                 error_log('SlipVerify settings save failed: ' . $e->getMessage());
@@ -116,29 +130,48 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
         }
     } elseif ($action === 'probe_nearby_slip') {
         $apiKey = nearbySlipValidateApiKey((string) getSetting('slipverify_nearby_api_key', ''));
+        $storeReceiver = slipVerifyAdminStoreReceiverConfig();
         if ($apiKey === '') {
             $error = $isTh ? 'ยังไม่ได้บันทึก SlipVerify API Key' : 'SlipVerify API key is not configured.';
+        } elseif (($storeReceiver['receiver_name'] ?? '') === '' && ($storeReceiver['account_number'] ?? '') === '') {
+            $error = $isTh
+                ? 'ยังไม่มีชื่อผู้รับหรือเลขบัญชีร้านในตั้งค่าระบบเดิม กรุณาตั้งค่าบัญชีร้านก่อนทดสอบ'
+                : 'The existing store settings do not contain a receiver name or bank account. Configure the store account first.';
         } else {
             $image = slipVerifyAdminReadImage();
             if (empty($image['success'])) {
                 $error = (string) ($image['message'] ?? 'Invalid slip image');
             } else {
-                $receiverOptions = [
-                    'expected_receiver_name' => (string) getSetting('slipverify_nearby_receiver_name', ''),
-                    'expected_bank_code' => (string) getSetting('slipverify_nearby_bank_code', ''),
-                    'expected_account_no' => (string) getSetting('slipverify_nearby_account_no', ''),
-                ];
+                $receiverOptions = [];
+                if (($storeReceiver['receiver_name'] ?? '') !== '') {
+                    $receiverOptions['expected_receiver_name'] = (string) $storeReceiver['receiver_name'];
+                }
+                // Nearby documents expected_account_no as a bank-account value. Do not
+                // silently substitute the PromptPay phone number when the store account is empty.
+                if (($storeReceiver['account_number'] ?? '') !== '') {
+                    $receiverOptions['expected_account_no'] = (string) $storeReceiver['account_number'];
+                }
+
                 $started = microtime(true);
-                $probeResult = nearbySlipVerifyV2($apiKey, (string) $image['bytes'], (string) $image['mime'], $receiverOptions, 45000);
+                $probeResult = nearbySlipVerifyV2(
+                    $apiKey,
+                    (string) $image['bytes'],
+                    (string) $image['mime'],
+                    $receiverOptions,
+                    45000
+                );
                 $probeResult['admin_probe_duration_ms'] = (int) round((microtime(true) - $started) * 1000);
                 $probeResult['image_sha256'] = (string) $image['sha256'];
                 $probeResult['image_bytes'] = (int) $image['size'];
+                $probeResult['receiver_source'] = 'existing_store_settings';
                 unset($image['bytes']);
+
                 if (!empty($probeResult['success'])) {
                     $success = $isTh ? 'SlipVerify ตรวจสลิปทดสอบสำเร็จ โดยไม่มีการเติมเงินจริง' : 'SlipVerify test succeeded. No wallet credit was performed.';
-                    logHistory((int) $_SESSION['user_id'], 'probe_slipverify_nearby_success', 'SlipVerify Nearby API-key admin probe succeeded');
+                    logHistory((int) $_SESSION['user_id'], 'probe_slipverify_nearby_success', 'SlipVerify Nearby API-key admin probe succeeded using existing store receiver settings');
                 } else {
-                    $error = ($isTh ? 'ทดสอบ SlipVerify ไม่ผ่าน: ' : 'SlipVerify test failed: ') . (string) ($probeResult['message'] ?? $probeResult['error_code'] ?? 'unknown');
+                    $error = ($isTh ? 'ทดสอบ SlipVerify ไม่ผ่าน: ' : 'SlipVerify test failed: ')
+                        . (string) ($probeResult['message'] ?? $probeResult['error_code'] ?? 'unknown');
                     logHistory((int) $_SESSION['user_id'], 'probe_slipverify_nearby_failed', 'SlipVerify Nearby admin probe failed: ' . substr((string) ($probeResult['error_code'] ?? 'unknown'), 0, 80));
                 }
             }
@@ -148,9 +181,8 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
 
 $apiKeyConfigured = nearbySlipValidateApiKey((string) getSetting('slipverify_nearby_api_key', '')) !== '';
 $legacyTokenConfigured = trim((string) getSetting('slipverify_nearby_token', '')) !== '';
-$receiverName = (string) getSetting('slipverify_nearby_receiver_name', (string) getSetting('easyslip_receiver_name', ''));
-$bankCode = (string) getSetting('slipverify_nearby_bank_code', '');
-$accountNo = (string) getSetting('slipverify_nearby_account_no', (string) getSetting('easyslip_account_number', ''));
+$storeReceiver = slipVerifyAdminStoreReceiverConfig();
+$receiverConfigured = ($storeReceiver['receiver_name'] ?? '') !== '' || ($storeReceiver['account_number'] ?? '') !== '';
 ?>
 <!doctype html>
 <html lang="<?php echo htmlspecialchars($lang, ENT_QUOTES, 'UTF-8'); ?>">
@@ -168,57 +200,68 @@ $accountNo = (string) getSetting('slipverify_nearby_account_no', (string) getSet
     <div class="flex flex-col md:flex-row md:items-start md:justify-between gap-3">
         <div>
             <h1 class="text-2xl font-bold"><i class="bi bi-receipt-cutoff text-emerald-300 mr-2"></i>SlipVerify / Nearby API</h1>
-            <p class="text-gray-400 text-sm mt-1"><?php echo $isTh ? 'ใช้ API Key แบบ X-API-Key ตามระบบใหม่ และทดสอบแยกจากระบบเติมเงินจริง' : 'Uses the new X-API-Key authentication and probes separately from the live wallet flow.'; ?></p>
+            <p class="text-gray-400 text-sm mt-1"><?php echo $isTh ? 'ตั้งเฉพาะ API Key ส่วนบัญชีผู้รับใช้ค่ากลางของร้านเดิมอัตโนมัติ' : 'Configure only the API key. Receiver validation automatically uses the existing store account.'; ?></p>
         </div>
-        <a href="settings.php" class="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm hover:bg-white/10"><i class="bi bi-gear"></i><?php echo $isTh ? 'กลับหน้าตั้งค่าระบบ' : 'Back to system settings'; ?></a>
+        <a href="settings.php" class="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm hover:bg-white/10"><i class="bi bi-gear"></i><?php echo $isTh ? 'แก้บัญชีร้านในหน้าตั้งค่า' : 'Edit store account settings'; ?></a>
     </div>
 
     <?php if ($error !== ''): ?><div class="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-red-100"><?php echo htmlspecialchars($error, ENT_QUOTES, 'UTF-8'); ?></div><?php endif; ?>
     <?php if ($success !== ''): ?><div class="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-emerald-100"><?php echo htmlspecialchars($success, ENT_QUOTES, 'UTF-8'); ?></div><?php endif; ?>
-    <?php if ($legacyTokenConfigured && !$apiKeyConfigured): ?><div class="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-amber-100 text-sm"><i class="bi bi-exclamation-triangle mr-2"></i><?php echo $isTh ? 'พบ JWT Token เก่าที่เคยบันทึกไว้ แต่ระบบใหม่จะไม่ใช้ Token นี้ กรุณาสร้าง API Key ใหม่แล้วบันทึกด้านล่าง' : 'A legacy JWT token is stored, but it is ignored. Create and save a new API key below.'; ?></div><?php endif; ?>
+    <?php if ($legacyTokenConfigured && !$apiKeyConfigured): ?><div class="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-amber-100 text-sm"><i class="bi bi-exclamation-triangle mr-2"></i><?php echo $isTh ? 'พบ JWT Token เก่าที่เคยบันทึกไว้ แต่ระบบใหม่ไม่ใช้แล้ว กรุณาใส่ API Key ใหม่' : 'A legacy JWT token is stored but ignored. Save a new API key.'; ?></div><?php endif; ?>
 
     <section class="glass rounded-2xl p-5 md:p-6 space-y-5">
         <div class="flex flex-wrap items-center justify-between gap-3">
             <div>
-                <h2 class="text-lg font-semibold"><i class="bi bi-key text-amber-300 mr-2"></i><?php echo $isTh ? 'API Key และผู้รับเงิน' : 'API Key & receiver checks'; ?></h2>
+                <h2 class="text-lg font-semibold"><i class="bi bi-key text-amber-300 mr-2"></i>SlipVerify API Key</h2>
                 <p class="text-xs text-gray-500 mt-1">POST https://api.nearbyshop.xyz/slipVerify/v2 · Header: X-API-Key</p>
             </div>
             <span class="rounded-full px-3 py-1 text-xs <?php echo $apiKeyConfigured ? 'bg-emerald-500/15 text-emerald-300' : 'bg-amber-500/15 text-amber-300'; ?>"><?php echo $apiKeyConfigured ? ($isTh ? 'มี API Key แล้ว' : 'API key configured') : ($isTh ? 'ยังไม่มี API Key' : 'API key missing'); ?></span>
         </div>
 
-        <form method="post" class="grid grid-cols-1 md:grid-cols-2 gap-4" autocomplete="off">
+        <form method="post" class="space-y-4" autocomplete="off">
             <?php echo csrfField(); ?>
-            <div class="md:col-span-2">
+            <div>
                 <label class="block text-sm text-gray-300 mb-2">SlipVerify API Key</label>
                 <input type="password" name="nearby_api_key" maxlength="512" autocomplete="new-password"
                        placeholder="<?php echo $apiKeyConfigured ? ($isTh ? 'เว้นว่างเพื่อใช้ API Key เดิม' : 'Leave blank to keep the existing API key') : 'nb_live_your_api_key_here'; ?>"
                        class="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 font-mono text-sm text-white">
-                <p class="mt-1 text-xs text-gray-500"><?php echo $isTh ? 'ใส่เฉพาะ API Key ไม่ต้องใส่ X-API-Key: ด้านหน้า ระบบจะไม่แสดงคีย์เดิมกลับมาบนหน้าเว็บ' : 'Paste only the API key, without the X-API-Key: prefix. The stored key is never echoed back.'; ?></p>
+                <p class="mt-1 text-xs text-gray-500"><?php echo $isTh ? 'ใส่เฉพาะ API Key ไม่ต้องใส่ X-API-Key: ด้านหน้า' : 'Paste only the API key without the X-API-Key: prefix.'; ?></p>
             </div>
-            <div>
-                <label class="block text-sm text-gray-300 mb-2"><?php echo $isTh ? 'ชื่อผู้รับที่คาดหวัง' : 'Expected receiver name'; ?></label>
-                <input type="text" name="nearby_receiver_name" maxlength="150" value="<?php echo htmlspecialchars($receiverName, ENT_QUOTES, 'UTF-8'); ?>" placeholder="สมชาย ใจดี" class="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-white">
-            </div>
-            <div>
-                <label class="block text-sm text-gray-300 mb-2"><?php echo $isTh ? 'รหัสธนาคารผู้รับ' : 'Expected bank code'; ?></label>
-                <input type="text" name="nearby_bank_code" maxlength="32" value="<?php echo htmlspecialchars($bankCode, ENT_QUOTES, 'UTF-8'); ?>" placeholder="004 หรือ KBANK" class="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 font-mono text-white">
-            </div>
-            <div class="md:col-span-2">
-                <label class="block text-sm text-gray-300 mb-2"><?php echo $isTh ? 'เลขบัญชีผู้รับ หรือเลขท้ายที่ต้องตรง' : 'Expected receiver account / suffix'; ?></label>
-                <input type="text" name="nearby_account_no" maxlength="100" value="<?php echo htmlspecialchars($accountNo, ENT_QUOTES, 'UTF-8'); ?>" placeholder="067-8-999346 หรือ 346" class="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 font-mono text-white">
-                <p class="mt-1 text-xs text-gray-500"><?php echo $isTh ? 'ส่งข้อมูลสามช่องนี้ไปให้ SlipVerify ตรวจพร้อมสลิป เพื่อลดความเสี่ยงลูกค้าโอนผิดบัญชีหรือเอาสลิปคนอื่นมาใช้' : 'These values are sent with the slip for receiver validation.'; ?></p>
-            </div>
-            <div class="md:col-span-2 flex flex-wrap gap-3">
-                <button type="submit" name="action" value="save_nearby_settings" class="rounded-xl bg-emerald-600 hover:bg-emerald-500 px-5 py-3 font-semibold"><i class="bi bi-save mr-2"></i><?php echo $isTh ? 'บันทึก SlipVerify' : 'Save SlipVerify'; ?></button>
+            <div class="flex flex-wrap gap-3">
+                <button type="submit" name="action" value="save_nearby_settings" class="rounded-xl bg-emerald-600 hover:bg-emerald-500 px-5 py-3 font-semibold"><i class="bi bi-save mr-2"></i><?php echo $isTh ? 'บันทึก API Key' : 'Save API key'; ?></button>
                 <?php if ($apiKeyConfigured || $legacyTokenConfigured): ?><button type="submit" name="action" value="clear_nearby_api_key" formnovalidate onclick="return confirm('<?php echo $isTh ? 'ล้าง API Key/Token เก่าที่บันทึกไว้?' : 'Clear stored API key and legacy token?'; ?>')" class="rounded-xl border border-red-400/30 bg-red-500/10 hover:bg-red-500/20 px-5 py-3 font-semibold text-red-200"><i class="bi bi-trash mr-2"></i><?php echo $isTh ? 'ล้าง Key' : 'Clear key'; ?></button><?php endif; ?>
             </div>
         </form>
     </section>
 
+    <section class="glass rounded-2xl p-5 md:p-6 space-y-4">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+            <div>
+                <h2 class="text-lg font-semibold"><i class="bi bi-bank text-blue-300 mr-2"></i><?php echo $isTh ? 'บัญชีร้านที่ใช้ตรวจผู้รับ' : 'Store receiver used for validation'; ?></h2>
+                <p class="text-xs text-gray-500 mt-1"><?php echo $isTh ? 'ดึงจากค่าระบบเดิมโดยตรง ไม่มีชุดตั้งค่า Nearby แยก' : 'Read directly from the existing store settings. There is no separate Nearby receiver configuration.'; ?></p>
+            </div>
+            <span class="rounded-full px-3 py-1 text-xs <?php echo $receiverConfigured ? 'bg-emerald-500/15 text-emerald-300' : 'bg-red-500/15 text-red-300'; ?>"><?php echo $receiverConfigured ? ($isTh ? 'พร้อมใช้' : 'Ready') : ($isTh ? 'ข้อมูลไม่ครบ' : 'Incomplete'); ?></span>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+            <div class="rounded-xl bg-white/5 p-4"><div class="text-gray-500 text-xs mb-1"><?php echo $isTh ? 'ชื่อผู้รับ' : 'Receiver name'; ?></div><div><?php echo htmlspecialchars((string) (($storeReceiver['receiver_name'] ?? '') !== '' ? $storeReceiver['receiver_name'] : '-'), ENT_QUOTES, 'UTF-8'); ?></div></div>
+            <div class="rounded-xl bg-white/5 p-4"><div class="text-gray-500 text-xs mb-1"><?php echo $isTh ? 'ธนาคาร' : 'Bank'; ?></div><div><?php echo htmlspecialchars((string) (($storeReceiver['bank_name'] ?? '') !== '' ? $storeReceiver['bank_name'] : '-'), ENT_QUOTES, 'UTF-8'); ?></div></div>
+            <div class="rounded-xl bg-white/5 p-4"><div class="text-gray-500 text-xs mb-1"><?php echo $isTh ? 'เลขบัญชี' : 'Bank account'; ?></div><div class="font-mono"><?php echo htmlspecialchars((string) (($storeReceiver['account_number'] ?? '') !== '' ? $storeReceiver['account_number'] : '-'), ENT_QUOTES, 'UTF-8'); ?></div></div>
+            <div class="rounded-xl bg-white/5 p-4"><div class="text-gray-500 text-xs mb-1"><?php echo $isTh ? 'PromptPay / เบอร์โทรเดิม' : 'Existing PromptPay / phone'; ?></div><div class="font-mono"><?php echo htmlspecialchars((string) (($storeReceiver['phone'] ?? '') !== '' ? $storeReceiver['phone'] : '-'), ENT_QUOTES, 'UTF-8'); ?></div></div>
+        </div>
+        <div class="rounded-xl border border-blue-400/20 bg-blue-400/5 p-4 text-sm text-blue-100">
+            <i class="bi bi-arrow-repeat mr-2"></i><?php echo $isTh
+                ? 'ตอนทดสอบ Nearby จะส่งชื่อผู้รับและเลขบัญชีด้านบนเป็น expected_receiver_name / expected_account_no ทุกครั้งโดยอัตโนมัติ ถ้าแก้บัญชีร้านในหน้าตั้งค่า ค่านี้จะเปลี่ยนตามทันที'
+                : 'Nearby automatically sends the receiver name and bank account above as expected_receiver_name / expected_account_no on every probe. Changes in the main settings take effect here immediately.'; ?>
+        </div>
+        <?php if (($storeReceiver['account_number'] ?? '') === '' && ($storeReceiver['phone'] ?? '') !== ''): ?>
+            <div class="rounded-xl border border-amber-400/20 bg-amber-400/5 p-4 text-sm text-amber-100"><i class="bi bi-exclamation-triangle mr-2"></i><?php echo $isTh ? 'ระบบเดิมมีเฉพาะเบอร์ PromptPay แต่ไม่มีเลขบัญชีธนาคาร Nearby จึงจะตรวจชื่อผู้รับเท่านั้น และไม่เอาเบอร์โทรไปปลอมเป็น expected_account_no' : 'Only a PromptPay phone is configured, with no bank-account number. Nearby will validate the receiver name only; the phone is not substituted for expected_account_no.'; ?></div>
+        <?php endif; ?>
+    </section>
+
     <section class="glass rounded-2xl p-5 md:p-6 space-y-5">
         <div>
             <h2 class="text-lg font-semibold"><i class="bi bi-flask text-cyan-300 mr-2"></i><?php echo $isTh ? 'ทดสอบด้วยสลิปจริง แต่ไม่เติมเงินจริง' : 'Probe with a real slip, without crediting funds'; ?></h2>
-            <p class="text-xs text-gray-500 mt-1"><?php echo $isTh ? 'ทดสอบ API Key, สิทธิ์ v2, OCR, transaction ref, ยอดเงิน และ receiver validation ก่อนต่อเข้าระบบฝากเงินจริง' : 'Validate the API key, v2 permission, OCR, transaction reference, amount, and receiver validation before deposit integration.'; ?></p>
+            <p class="text-xs text-gray-500 mt-1"><?php echo $isTh ? 'ทดสอบ API Key, สิทธิ์ v2, OCR, transaction ref, ยอดเงิน และข้อมูลผู้รับจากบัญชีร้านเดิม' : 'Validate the API key, v2 permission, OCR, transaction reference, amount, and the existing store receiver.'; ?></p>
         </div>
         <form method="post" enctype="multipart/form-data" class="space-y-4">
             <?php echo csrfField(); ?>
@@ -229,7 +272,7 @@ $accountNo = (string) getSetting('slipverify_nearby_account_no', (string) getSet
                 <p class="mt-1 text-xs text-gray-500">JPEG / PNG / WebP · max 4MB</p>
             </div>
             <div class="rounded-xl border border-cyan-400/20 bg-cyan-400/5 p-4 text-sm text-cyan-100"><i class="bi bi-shield-check mr-2"></i><?php echo $isTh ? 'ปุ่มนี้เรียก Nearby API เท่านั้น ไม่เพิ่ม balance ไม่สร้าง transaction และไม่บันทึกฝากเงิน' : 'This calls Nearby only. It does not change balance, create a transaction, or save a deposit.'; ?></div>
-            <button type="submit" class="rounded-xl bg-cyan-600 hover:bg-cyan-500 px-5 py-3 font-semibold disabled:opacity-50" <?php echo $apiKeyConfigured ? '' : 'disabled'; ?>><i class="bi bi-send-check mr-2"></i><?php echo $isTh ? 'ส่งสลิปทดสอบไป SlipVerify' : 'Send test slip to SlipVerify'; ?></button>
+            <button type="submit" class="rounded-xl bg-cyan-600 hover:bg-cyan-500 px-5 py-3 font-semibold disabled:opacity-50" <?php echo ($apiKeyConfigured && $receiverConfigured) ? '' : 'disabled'; ?>><i class="bi bi-send-check mr-2"></i><?php echo $isTh ? 'ส่งสลิปทดสอบไป SlipVerify' : 'Send test slip to SlipVerify'; ?></button>
         </form>
     </section>
 
@@ -260,19 +303,18 @@ $accountNo = (string) getSetting('slipverify_nearby_account_no', (string) getSet
     <?php endif; ?>
 
     <section class="glass rounded-2xl p-5 md:p-6 text-sm text-gray-300 space-y-4">
-        <h2 class="text-lg font-semibold text-white"><i class="bi bi-info-circle text-blue-300 mr-2"></i><?php echo $isTh ? 'วิธีหาและใช้งาน API Key' : 'How to get and use the API key'; ?></h2>
+        <h2 class="text-lg font-semibold text-white"><i class="bi bi-info-circle text-blue-300 mr-2"></i><?php echo $isTh ? 'วิธีใช้' : 'How to use'; ?></h2>
         <ol class="list-decimal pl-5 space-y-2">
-            <li><?php echo $isTh ? 'เข้า Developer Portal ของ xNearby แล้วเข้าสู่ระบบ' : 'Open the xNearby developer portal and sign in.'; ?></li>
-            <li><?php echo $isTh ? 'สร้าง/รับ API Key และตรวจว่าคีย์มีสิทธิ์ v2' : 'Create/get an API key and make sure it has v2 permission.'; ?></li>
-            <li><?php echo $isTh ? 'คัดลอก API Key รูปแบบประมาณ nb_live_... มาใส่ช่องด้านบนแล้วกดบันทึก' : 'Copy the API key (for example nb_live_...) into the field above and save.'; ?></li>
-            <li><?php echo $isTh ? 'กรอกชื่อผู้รับ ธนาคาร และเลขบัญชี/เลขท้ายให้ตรงกับบัญชีร้าน' : 'Set receiver name, bank, and account/suffix to match the store account.'; ?></li>
-            <li><?php echo $isTh ? 'อัปโหลดสลิปจริงในส่วนทดสอบ แล้วดู SUCCESS / error code โดยยังไม่แตะยอดเงินจริง' : 'Upload a real slip in probe mode and inspect SUCCESS/error without touching wallet funds.'; ?></li>
+            <li><?php echo $isTh ? 'สร้าง API Key ที่ nearbyshop.xyz/developer และตรวจว่ามีสิทธิ์ v2' : 'Create an API key at nearbyshop.xyz/developer and make sure it has v2 permission.'; ?></li>
+            <li><?php echo $isTh ? 'ใส่ API Key ด้านบนแล้วกดบันทึก แค่นั้น ไม่ต้องกรอกบัญชีร้านซ้ำ' : 'Save the API key above. Do not duplicate the store account here.'; ?></li>
+            <li><?php echo $isTh ? 'ตรวจกล่องบัญชีร้านด้านบน ถ้าข้อมูลผิดให้แก้ในหน้าตั้งค่าหลักเพียงที่เดียว' : 'Check the store receiver card above. If it is wrong, edit it once in the main settings page.'; ?></li>
+            <li><?php echo $isTh ? 'อัปโหลดสลิปจริงแล้วดู SUCCESS / error code โดยยังไม่แตะยอดเงินจริง' : 'Upload a real slip and inspect SUCCESS/error without touching wallet funds.'; ?></li>
         </ol>
         <div class="flex flex-wrap gap-3">
             <a href="https://nearbyshop.xyz/developer" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-2 text-emerald-300 hover:text-emerald-200"><i class="bi bi-key-fill"></i>nearbyshop.xyz/developer</a>
             <a href="https://docs.nearbyshop.xyz/slip-verify.html" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-2 text-cyan-300 hover:text-cyan-200"><i class="bi bi-book"></i>SlipVerify Docs</a>
         </div>
-        <p class="text-xs text-gray-500"><?php echo $isTh ? 'อย่าส่ง API Key ในแชท อย่า commit ลง GitHub และอย่าใส่ใน JavaScript ฝั่ง browser' : 'Do not paste the API key into chat, commit it to GitHub, or expose it in browser-side JavaScript.'; ?></p>
+        <p class="text-xs text-gray-500"><?php echo $isTh ? 'API Key ถูกเก็บฝั่งเซิร์ฟเวอร์และไม่ถูกแสดงกลับในช่องกรอก อย่าส่งคีย์ในแชทหรือใส่ไว้ใน JavaScript ฝั่ง browser' : 'The API key stays server-side and is never echoed back in the form. Do not expose it in chat or browser-side JavaScript.'; ?></p>
     </section>
 </main>
 </body>

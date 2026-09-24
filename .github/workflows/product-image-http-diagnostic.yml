@@ -1,0 +1,42 @@
+name: Product Image HTTP Diagnostic
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/product-image-http-diagnostic.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Diagnose production HTTP surfaces
+        shell: bash
+        run: |
+          set -u
+          probe() {
+            name="$1"
+            url="$2"
+            follow="$3"
+            body="/tmp/${name}.body"
+            headers="/tmp/${name}.headers"
+            args=(--silent --show-error --max-time 20 -D "$headers" -o "$body" -w '%{http_code}')
+            if [ "$follow" = 'yes' ]; then args+=(--location); fi
+            code=$(curl "${args[@]}" "$url" 2>"/tmp/${name}.err")
+            rc=$?
+            echo "=== ${name} ==="
+            echo "curl_rc=${rc}"
+            echo "http_code=${code}"
+            echo "content_type=$(grep -i '^content-type:' "$headers" 2>/dev/null | tail -1 | tr -d '\r' || true)"
+            echo "location=$(grep -i '^location:' "$headers" 2>/dev/null | tail -1 | tr -d '\r' || true)"
+            echo "body_prefix=$(head -c 400 "$body" 2>/dev/null | tr '\r\n' '  ' || true)"
+            echo "curl_error=$(head -c 300 "/tmp/${name}.err" 2>/dev/null | tr '\r\n' '  ' || true)"
+          }
+          probe health 'https://sakazuki.spwz.online/health.php' yes
+          probe root 'https://sakazuki.spwz.online/' yes
+          probe runner_unauth 'https://sakazuki.spwz.online/automation_runner.php?mode=maintenance' no

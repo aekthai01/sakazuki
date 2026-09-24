@@ -174,7 +174,7 @@ if (!$isCli) {
         if (!in_array((int) ($last['type'] ?? 0), $fatalTypes, true)) return;
         $allowedStages = [
             'startup','schema','pending_orders','slip_reconciliation','cgo_inventory','supplier_catalog',
-            'cgo_catalog','shared_history','shared_binance_history','commerce_center','history_cleanup','admin_transaction_indexes',
+            'cgo_catalog','shared_history','shared_binance_history','commerce_center','history_cleanup','product_image_cleanup','product_image_optimizer','admin_transaction_indexes',
             'history_schema','commerce_schema','checkout_health','binance_clock','maintenance_diagnostics','unknown_job'
         ];
         $stage = (string) ($GLOBALS['sakazuki_direct_stage'] ?? 'unknown_job');
@@ -353,7 +353,7 @@ if ($schemaReady) automationRecordCronHeartbeat($runner);
 
 $definitions = automationJobDefinitions();
 $criticalJobs = ['pending_orders','slip_reconciliation','cgo_inventory','supplier_catalog'];
-$maintenanceJobs = ['cgo_catalog','shared_history','shared_binance_history','commerce_center','history_cleanup'];
+$maintenanceJobs = ['cgo_catalog','shared_history','shared_binance_history','commerce_center','history_cleanup','product_image_cleanup','product_image_optimizer'];
 $allowedJobs = $mode === 'critical' ? $criticalJobs : $maintenanceJobs;
 $budgetSeconds = $isCli ? 0 : ($mode === 'critical' ? 21 : 22);
 $results = [];

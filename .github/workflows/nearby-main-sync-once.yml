@@ -1,0 +1,232 @@
+name: Nearby Main Integration Sync Once
+
+on:
+  push:
+    branches:
+      - feat/nearby-main-integration-public-20260925
+    paths:
+      - ".github/workflows/nearby-main-sync-once.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout integration branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Assemble reviewed integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          old_ref='refs/remotes/origin/feat/nearby-main-slip-provider-20260924'
+          git fetch origin 'feat/nearby-main-slip-provider-20260924:refs/remotes/origin/feat/nearby-main-slip-provider-20260924'
+
+          git show "$old_ref:public_html/includes/slip_nearby.php" > public_html/includes/slip_nearby.php
+          git show "$old_ref:tests/slip_nearby_test.php" > tests/slip_nearby_test.php
+          git show "$old_ref:.github/workflows/slip-nearby-ci.yml" > .github/workflows/slip-nearby-ci.yml
+
+          rm -f public_html/admin/slipverify.php
+          rm -f .github/workflows/slipverify-production-deploy.yml
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(text, old, new, label):
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected 1 match, got {count}')
+              return text.replace(old, new, 1)
+
+          functions = Path('public_html/includes/functions.php')
+          f = functions.read_text()
+          f = replace_once(
+              f,
+              "require_once __DIR__ . '/slip_debug.php';\nrequire_once __DIR__ . '/product_image_lifecycle.php';",
+              "require_once __DIR__ . '/slip_debug.php';\nrequire_once __DIR__ . '/slip_nearby.php';\nrequire_once __DIR__ . '/product_image_lifecycle.php';",
+              'functions require slip_nearby',
+          )
+          target = "verifySlipWithEasyslip($imageBase64, $verificationRemark, ["
+          count = f.count(target)
+          if count != 2:
+              raise SystemExit(f'functions provider calls: expected 2 matches, got {count}')
+          f = f.replace(target, "verifySlipWithConfiguredProvider($imageBase64, $verificationRemark, [")
+          functions.write_text(f)
+
+          settings = Path('public_html/admin/settings.php')
+          s = settings.read_text()
+          s = replace_once(
+              s,
+              "        $esEnabled = settingsPostString('easyslip_enabled') === '1';\n        $esApiKey = trim(settingsPostString('easyslip_api_key'));",
+              "        $esEnabled = settingsPostString('easyslip_enabled') === '1';\n        $esProvider = strtolower(trim(settingsPostString('slip_verification_provider', 'easyslip')));\n        $esApiKey = trim(settingsPostString('easyslip_api_key'));\n        $nearbyApiKey = trim(settingsPostString('slipverify_nearby_api_key'));",
+              'settings provider inputs',
+          )
+          s = replace_once(
+              s,
+              "        $existingEasySlipApiKey = trim((string) (getSetting('easyslip_api_key') ?? ''));",
+              "        $existingEasySlipApiKey = trim((string) (getSetting('easyslip_api_key') ?? ''));\n        $existingNearbyApiKey = trim((string) (getSetting('slipverify_nearby_api_key') ?? ''));",
+              'settings existing nearby key',
+          )
+          s = replace_once(
+              s,
+              "        if ($esEnabled && $esApiKey === '' && $existingEasySlipApiKey === '') {\n            $error = Lang::t('admin.settings.error.easyslip_key_required');\n        } elseif ($esApiKey !== '' && (strlen($esApiKey) < 10 || strlen($esApiKey) > 512 || preg_match('/[\\x00-\\x1F\\x7F]/', $esApiKey))) {\n            $error = Lang::t('admin.settings.error.easyslip_key');",
+              "        if (!in_array($esProvider, ['easyslip', 'nearby'], true)) {\n            $error = getAppLang() === 'en'\n                ? 'Invalid bank-slip verification provider.'\n                : 'ผู้ให้บริการตรวจสอบสลิปไม่ถูกต้อง';\n        } elseif ($esEnabled && $esProvider === 'easyslip' && $esApiKey === '' && $existingEasySlipApiKey === '') {\n            $error = Lang::t('admin.settings.error.easyslip_key_required');\n        } elseif ($esEnabled && $esProvider === 'nearby' && $nearbyApiKey === '' && $existingNearbyApiKey === '') {\n            $error = getAppLang() === 'en'\n                ? 'xNearby SlipVerify API key is required when xNearby is selected.'\n                : 'กรุณากรอก xNearby SlipVerify API Key เมื่อเลือกใช้ xNearby';\n        } elseif ($esApiKey !== '' && (strlen($esApiKey) < 10 || strlen($esApiKey) > 512 || preg_match('/[\\x00-\\x1F\\x7F]/', $esApiKey))) {\n            $error = Lang::t('admin.settings.error.easyslip_key');\n        } elseif ($nearbyApiKey !== '' && (strlen($nearbyApiKey) < 12 || strlen($nearbyApiKey) > 512 || preg_match('/[\\x00-\\x20\\x7F]/', $nearbyApiKey))) {\n            $error = getAppLang() === 'en'\n                ? 'xNearby SlipVerify API key format is invalid.'\n                : 'รูปแบบ xNearby SlipVerify API Key ไม่ถูกต้อง';",
+              'settings provider validation',
+          )
+          s = replace_once(
+              s,
+              "                    ['easyslip_enabled', $esEnabled ? '1' : '0'],\n                    ['easyslip_receiver_name', $esReceiverNameTh],",
+              "                    ['easyslip_enabled', $esEnabled ? '1' : '0'],\n                    ['slip_verification_provider', $esProvider],\n                    ['easyslip_receiver_name', $esReceiverNameTh],",
+              'settings provider write',
+          )
+          s = replace_once(
+              s,
+              "                if ($esApiKey !== '') {\n                    $writes[] = ['easyslip_api_key', $esApiKey];\n                }\n                foreach ($writes as $write) {",
+              "                if ($esApiKey !== '') {\n                    $writes[] = ['easyslip_api_key', $esApiKey];\n                }\n                if ($nearbyApiKey !== '') {\n                    $writes[] = ['slipverify_nearby_api_key', $nearbyApiKey];\n                }\n                // Legacy JWT/Bearer auth is retired by xNearby; keep stale tokens inert.\n                $writes[] = ['slipverify_nearby_access_token', ''];\n                foreach ($writes as $write) {",
+              'settings nearby key write',
+          )
+          s = replace_once(
+              s,
+              "                $success = Lang::t('admin.settings.success.easyslip');\n                logHistory($_SESSION['user_id'], 'update_easyslip', 'Updated EasySlip API and receiver settings');",
+              "                $success = getAppLang() === 'en'\n                    ? 'Bank-slip verification settings updated.'\n                    : 'บันทึกการตั้งค่าตรวจสอบสลิปแล้ว';\n                logHistory($_SESSION['user_id'], 'update_bank_slip_verification', 'Updated bank-slip provider, credentials, and shared receiver settings');",
+              'settings success message',
+          )
+          s = replace_once(
+              s,
+              "                                <span class=\"text-gray-300\" data-lang=\"admin.settings.easyslip_enabled\"><?php echo Lang::t('admin.settings.easyslip_enabled'); ?></span>",
+              "                                <span class=\"text-gray-300\"><?php echo $currentLang === 'en' ? 'Enable bank-slip verification' : 'เปิดระบบตรวจสอบสลิปธนาคาร'; ?></span>",
+              'settings enabled label',
+          )
+          s = replace_once(
+              s,
+              "                            <div>\n                                <label class=\"text-gray-400 text-sm mb-2 block\" data-lang=\"admin.settings.api_key\"><?php echo Lang::t('admin.settings.api_key'); ?></label>\n                                <input type=\"password\" name=\"easyslip_api_key\"",
+              "                            <div>\n                                <label class=\"text-gray-400 text-sm mb-2 block\">\n                                    <?php echo $currentLang === 'en' ? 'Verification provider' : 'ผู้ให้บริการตรวจสอบสลิป'; ?>\n                                </label>\n                                <?php $slipProvider = strtolower(trim((string) getSetting('slip_verification_provider', 'easyslip'))); ?>\n                                <select name=\"slip_verification_provider\"\n                                        class=\"glass border border-green-500/30 rounded-lg p-2 w-full bg-transparent text-white\">\n                                    <option value=\"easyslip\" <?php echo $slipProvider !== 'nearby' ? 'selected' : ''; ?>>EasySlip</option>\n                                    <option value=\"nearby\" <?php echo $slipProvider === 'nearby' ? 'selected' : ''; ?>>xNearby SlipVerify v2</option>\n                                </select>\n                                <small class=\"text-gray-500 text-xs\">\n                                    <?php echo $currentLang === 'en'\n                                        ? 'Both providers use the same receiver name and bank account configured below.'\n                                        : 'ทั้งสองผู้ให้บริการใช้ชื่อผู้รับและบัญชีธนาคารชุดเดียวกันที่ตั้งไว้ด้านล่าง'; ?>\n                                </small>\n                            </div>\n\n                            <div>\n                                <label class=\"text-gray-400 text-sm mb-2 block\">EasySlip API Key</label>\n                                <input type=\"password\" name=\"easyslip_api_key\"",
+              'settings provider selector',
+          )
+          s = replace_once(
+              s,
+              "                                <small class=\"text-gray-500 text-xs\" data-lang=\"admin.settings.easyslip_api_hint\"><?php echo Lang::t('admin.settings.easyslip_api_hint'); ?></small>\n                            </div>\n\n                            <div>\n                                <label class=\"text-gray-400 text-sm mb-2 block\" data-lang=\"admin.settings.easyslip_phone\"><?php echo Lang::t('admin.settings.easyslip_phone'); ?></label>",
+              "                                <small class=\"text-gray-500 text-xs\" data-lang=\"admin.settings.easyslip_api_hint\"><?php echo Lang::t('admin.settings.easyslip_api_hint'); ?></small>\n                            </div>\n\n                            <div>\n                                <label class=\"text-gray-400 text-sm mb-2 block\">xNearby SlipVerify API Key</label>\n                                <input type=\"password\" name=\"slipverify_nearby_api_key\"\n                                       class=\"glass border border-green-500/30 rounded-lg p-2 w-full bg-transparent text-white font-mono text-sm\"\n                                       value=\"\" autocomplete=\"new-password\"\n                                       placeholder=\"<?php echo $currentLang === 'en' ? 'Leave blank to keep the current API key' : 'เว้นว่างเพื่อใช้ API Key เดิม'; ?>\">\n                                <small class=\"text-gray-500 text-xs\">\n                                    <?php echo $currentLang === 'en'\n                                        ? 'Uses X-API-Key with xNearby SlipVerify v2. Legacy Bearer/JWT tokens are not used.'\n                                        : 'ใช้ X-API-Key กับ xNearby SlipVerify v2 และไม่ใช้ Bearer/JWT แบบเก่า'; ?>\n                                </small>\n                            </div>\n\n                            <div>\n                                <label class=\"text-gray-400 text-sm mb-2 block\" data-lang=\"admin.settings.easyslip_phone\"><?php echo Lang::t('admin.settings.easyslip_phone'); ?></label>",
+              'settings nearby API field',
+          )
+          settings.write_text(s)
+
+          ci = Path('.github/workflows/slip-nearby-ci.yml')
+          c = ci.read_text()
+          old_header = """name: Bank Slip Provider CI\n\n# GitHub Actions minutes are exhausted for the current billing cycle.\n# Keep this workflow manual-only until the owner re-enables automatic CI.\non:\n  workflow_dispatch:\n"""
+          new_header = """name: Bank Slip Provider CI\n\non:\n  push:\n    branches:\n      - main\n    paths:\n      - \"public_html/includes/functions.php\"\n      - \"public_html/includes/slip_nearby.php\"\n      - \"public_html/admin/settings.php\"\n      - \"public_html/admin/slipverify.php\"\n      - \"tests/slip_nearby_test.php\"\n      - \".github/workflows/slip-nearby-ci.yml\"\n  pull_request:\n    branches:\n      - main\n    paths:\n      - \"public_html/includes/functions.php\"\n      - \"public_html/includes/slip_nearby.php\"\n      - \"public_html/admin/settings.php\"\n      - \"public_html/admin/slipverify.php\"\n      - \"tests/slip_nearby_test.php\"\n      - \".github/workflows/slip-nearby-ci.yml\"\n  workflow_dispatch:\n"""
+          c = replace_once(c, old_header, new_header, 'CI automatic triggers')
+          checkout = """      - name: Checkout repository\n        uses: actions/checkout@v4\n\n"""
+          secret_guard = r'''      - name: Guard obvious committed secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e private/database.php
+          test ! -e private/cheatgame.php
+          python3 - <<'PYSCAN'
+          from pathlib import Path
+          import re, subprocess
+          patterns = {
+              'Nearby live API key': re.compile(rb'nb_live_[A-Za-z0-9_-]{8,}'),
+              'GitHub token': re.compile(rb'(?:ghp_|github_pat_)[A-Za-z0-9_]{16,}'),
+              'OpenAI-style secret': re.compile(rb'sk-[A-Za-z0-9_-]{20,}'),
+              'Stripe live secret': re.compile(rb'sk_live_[A-Za-z0-9]{12,}'),
+              'Slack bot token': re.compile(rb'xoxb-[A-Za-z0-9-]{16,}'),
+              'Private key block': re.compile(rb'-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----'),
+          }
+          files = subprocess.check_output(['git','ls-files','-z']).split(b'\0')
+          findings = []
+          for raw in files:
+              if not raw:
+                  continue
+              path = Path(raw.decode())
+              try:
+                  data = path.read_bytes()
+              except OSError:
+                  continue
+              if b'\0' in data[:4096]:
+                  continue
+              for label, rx in patterns.items():
+                  m = rx.search(data)
+                  if m:
+                      line = data.count(b'\n', 0, m.start()) + 1
+                      findings.append((str(path), line, label))
+          db = Path('private/database.php.example').read_text()
+          m = re.search(r"'pass'\s*=>\s*'([^']*)'", db)
+          if not m or m.group(1) != 'YOUR_DATABASE_PASSWORD':
+              findings.append(('private/database.php.example', 1, 'database example must use placeholder password'))
+          if findings:
+              for path, line, label in findings:
+                  print(f'Potential secret: {label} at {path}:{line}')
+              raise SystemExit(1)
+          print('Secret guard passed without printing credential values.')
+          PYSCAN
+
+'''
+          c = replace_once(c, checkout, checkout + secret_guard, 'CI secret guard')
+          ci.write_text(c)
+          PY
+
+      - name: Validate PHP and provider contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          php -l public_html/includes/functions.php
+          php -l public_html/includes/slip_nearby.php
+          php -l public_html/admin/settings.php
+          php -l tests/slip_nearby_test.php
+          php tests/slip_nearby_test.php
+          test ! -e public_html/admin/slipverify.php
+          test ! -e .github/workflows/slipverify-production-deploy.yml
+          grep -q "verifySlipWithConfiguredProvider" public_html/includes/functions.php
+          grep -q "slip_verification_provider" public_html/admin/settings.php
+
+      - name: Scan integration tree for obvious secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re, subprocess
+          patterns = {
+              'Nearby live API key': re.compile(rb'nb_live_[A-Za-z0-9_-]{8,}'),
+              'GitHub token': re.compile(rb'(?:ghp_|github_pat_)[A-Za-z0-9_]{16,}'),
+              'OpenAI-style secret': re.compile(rb'sk-[A-Za-z0-9_-]{20,}'),
+              'Stripe live secret': re.compile(rb'sk_live_[A-Za-z0-9]{12,}'),
+              'Slack bot token': re.compile(rb'xoxb-[A-Za-z0-9-]{16,}'),
+              'Private key block': re.compile(rb'-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----'),
+          }
+          findings=[]
+          for raw in subprocess.check_output(['git','ls-files','-z']).split(b'\0'):
+              if not raw: continue
+              p=Path(raw.decode())
+              try: data=p.read_bytes()
+              except OSError: continue
+              if b'\0' in data[:4096]: continue
+              for label,rx in patterns.items():
+                  m=rx.search(data)
+                  if m:
+                      findings.append((str(p), data.count(b'\n',0,m.start())+1, label))
+          if findings:
+              for p,line,label in findings:
+                  print(f'Potential secret: {label} at {p}:{line}')
+              raise SystemExit(1)
+          print('Current integration tree passed secret scan; values are never echoed.')
+          PY
+
+      - name: Commit synchronized integration and remove one-shot workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/workflows/nearby-main-sync-once.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'feat: integrate xNearby into main slip verification flow'
+          git push origin HEAD:feat/nearby-main-integration-public-20260925

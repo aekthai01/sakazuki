@@ -1,4 +1,38 @@
 <?php
+$GLOBALS['nearby_test_settings'] = [];
+$GLOBALS['nearby_test_easyslip_calls'] = [];
+
+function getSetting($key, $default = '')
+{
+    return array_key_exists((string) $key, $GLOBALS['nearby_test_settings'])
+        ? $GLOBALS['nearby_test_settings'][(string) $key]
+        : $default;
+}
+
+function verifySlipWithEasyslip($imageBase64, string $remark = '', array $debugContext = []): array
+{
+    $GLOBALS['nearby_test_easyslip_calls'][] = [
+        'image' => $imageBase64,
+        'remark' => $remark,
+        'debug' => $debugContext,
+    ];
+    return [
+        'success' => true,
+        'data' => [
+            'transaction_ref' => 'easy-ref',
+            'amount' => 1.0,
+            'transfer_date' => '2026-09-24T00:00:00+00:00',
+            'sender_name' => 'sender',
+            'sender_account' => '1111',
+            'receiver_name' => 'receiver',
+            'receiver_account' => '2222',
+            'bank_code' => '014',
+            'verification_remark' => $remark,
+            'is_duplicate' => false,
+        ],
+    ];
+}
+
 require_once __DIR__ . '/../public_html/includes/slip_nearby.php';
 
 $tests = 0;
@@ -199,6 +233,30 @@ n_assert(($base64Calls[0]['options']['expected_account_no'] ?? '') === '346', 'b
 
 $result = nearbySlipVerifyBase64($apiKey, 'not-base64***', [], 5000, static fn() => n_http($fixture));
 n_assert(empty($result['success']) && ($result['error_code'] ?? '') === 'invalid_image_payload', 'invalid base64 should fail before transport');
+
+// Provider selection must be explicit, conservative, and reuse the one store account source.
+$GLOBALS['nearby_test_settings'] = [];
+n_assert(slipVerificationConfiguredProvider() === 'easyslip', 'missing provider setting must preserve EasySlip as the safe default');
+$GLOBALS['nearby_test_settings']['slip_verification_provider'] = 'unknown';
+n_assert(slipVerificationConfiguredProvider() === 'easyslip', 'unknown provider setting must fall back to EasySlip');
+$GLOBALS['nearby_test_settings']['slip_verification_provider'] = 'nearby';
+n_assert(slipVerificationConfiguredProvider() === 'nearby', 'Nearby provider setting should be recognized');
+$GLOBALS['nearby_test_settings']['easyslip_receiver_name'] = 'นาย อัครชัย แจ้งกระจ่าง';
+$GLOBALS['nearby_test_settings']['easyslip_receiver_name_en'] = 'Akkarachai';
+$GLOBALS['nearby_test_settings']['easyslip_account_number'] = '6798475698';
+$GLOBALS['nearby_test_settings']['easyslip_bank_name'] = 'กรุงไทย';
+$receiverOptions = nearbySlipConfiguredReceiverOptions();
+n_assert(($receiverOptions['expected_receiver_name'] ?? '') === 'นาย อัครชัย แจ้งกระจ่าง', 'Nearby must reuse the existing Thai receiver name');
+n_assert(($receiverOptions['expected_account_no'] ?? '') === '6798475698', 'Nearby must reuse the existing store account number');
+n_assert(!isset($receiverOptions['expected_bank_code']), 'Nearby must not guess a bank code from the stored display name');
+
+$GLOBALS['nearby_test_settings']['slip_verification_provider'] = 'easyslip';
+$GLOBALS['nearby_test_easyslip_calls'] = [];
+$routerResult = verifySlipWithConfiguredProvider('data:image/png;base64,ZmFrZQ==', 'ez2:test', ['attempt_uuid' => 'attempt-test']);
+n_assert(!empty($routerResult['success']), 'configured provider router should preserve the EasySlip path');
+n_assert(($routerResult['provider'] ?? '') === 'easyslip', 'EasySlip route should identify its provider');
+n_assert(count($GLOBALS['nearby_test_easyslip_calls']) === 1, 'EasySlip router path should make exactly one provider call');
+n_assert(($GLOBALS['nearby_test_easyslip_calls'][0]['remark'] ?? '') === 'ez2:test', 'router must preserve the signed verification remark for EasySlip');
 
 if ($failures > 0) {
     fwrite(STDERR, "{$failures} of {$tests} assertions failed\n");

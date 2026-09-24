@@ -1,7 +1,8 @@
 <?php
-// Private application configuration. Keep this directory outside public_html.
-// Copy this file to private/database.php and replace placeholders with the real values.
-if (!defined('APP_BASE_URL')) define('APP_BASE_URL', 'https://your-domain.example');
+// Private application configuration example.
+// Keep real database credentials outside Git and outside public_html.
+// Copy this file to private/database.php on the host and fill values there.
+if (!defined('APP_BASE_URL')) define('APP_BASE_URL', 'https://example.com');
 if (!defined('TRUEMONEY_PROVIDER_URL')) define('TRUEMONEY_PROVIDER_URL', 'https://truemoneyapi.vercel.app/api/truewallet');
 
 return [

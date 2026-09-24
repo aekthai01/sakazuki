@@ -1,0 +1,178 @@
+# ============================================================
+# MASTER SECURITY RULES — my-shop2
+# Generated: 2026-05-10
+# ============================================================
+
+# Disable directory listing & MultiViews
+Options -Indexes -MultiViews
+
+# Disable server signature
+ServerSignature Off
+
+# ──────────────────────────────────────────────────────────────
+# FILE ACCESS CONTROL
+# ──────────────────────────────────────────────────────────────
+
+# Block access to hidden files (.git, .env, .htaccess, .trunk, etc.)
+<FilesMatch "^\.">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order deny,allow
+        Deny from all
+    </IfModule>
+</FilesMatch>
+
+# Block access to sensitive file extensions
+<FilesMatch "\.(sql|log|bak|zip|gz|tar|7z|rar|sh|bash|ini|conf|yaml|yml|xml|md|txt|php1|body|tail|env|pem|key|crt)$">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order deny,allow
+        Deny from all
+    </IfModule>
+</FilesMatch>
+
+# Block access to error_log files
+<Files "error_log">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order deny,allow
+        Deny from all
+    </IfModule>
+</Files>
+
+# Block access to exchange_rate_cache.json
+<Files "exchange_rate_cache.json">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order deny,allow
+        Deny from all
+    </IfModule>
+</Files>
+
+# Block debug/test/migration files by pattern
+<FilesMatch "(^debug_|^test_|^fix_|^migrate_|^cleanup_|^final_|^hash\.php$|^get_users\.php$|^health\.php$)">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order deny,allow
+        Deny from all
+    </IfModule>
+</FilesMatch>
+
+# ──────────────────────────────────────────────────────────────
+# SECURITY HEADERS
+# ──────────────────────────────────────────────────────────────
+
+<IfModule mod_headers.c>
+    # Prevent MIME type sniffing
+    Header always set X-Content-Type-Options "nosniff"
+    
+    # Prevent clickjacking
+    Header always set X-Frame-Options "SAMEORIGIN"
+    
+    # XSS Protection (legacy browsers)
+    Header always set X-XSS-Protection "1; mode=block"
+    
+    # Referrer Policy
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+    
+    # Permissions Policy
+    Header always set Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+    
+    # Content Security Policy
+    Header always set Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://unpkg.com https://cdn.jsdelivr.net https://www.youtube.com https://s.ytimg.com; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; img-src 'self' data: blob: https:; font-src 'self' https://cdn.jsdelivr.net https://fonts.gstatic.com data:; connect-src 'self' https://www.youtube.com; frame-src 'self' https://www.youtube.com https://www.youtube-nocookie.com; frame-ancestors 'self'; base-uri 'self'; form-action 'self';"
+    
+    # Prevent downloads from opening automatically
+    Header set X-Download-Options "noopen"
+    
+    # HTTP Strict Transport Security (enable when HTTPS is ready)
+    # Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+    
+    # Prevent caching of PHP pages (sensitive data)
+    <FilesMatch "\.php$">
+        Header set Cache-Control "no-store, no-cache, must-revalidate, max-age=0"
+        Header set Pragma "no-cache"
+    </FilesMatch>
+    
+    # Remove server/PHP version exposure
+    Header unset X-Powered-By
+    Header unset Server
+</IfModule>
+
+# ──────────────────────────────────────────────────────────────
+# URL REWRITING & BLOCKING
+# ──────────────────────────────────────────────────────────────
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    
+    # Force HTTPS (uncomment when SSL is active)
+    # RewriteCond %{HTTPS} !=on
+    # RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+    
+    # Block direct access to includes directory
+    RewriteRule ^includes/ - [F,L]
+    
+    # Block access to .git directory
+    RewriteRule ^\.git - [F,L]
+    
+    # Block access to composer files
+    RewriteRule ^composer\.(json|lock)$ - [F,L]
+    
+    # Block access to package files
+    RewriteRule ^package(-lock)?\.json$ - [F,L]
+    
+    # Block SQL injection attempts in query strings
+    RewriteCond %{QUERY_STRING} (\bunion\b.*\bselect\b|\binsert\b.*\binto\b|\bdelete\b.*\bfrom\b|\bdrop\b.*\btable\b|\bupdate\b.*\bset\b) [NC,OR]
+    RewriteCond %{QUERY_STRING} (\bconcat\b.*\(|\bchar\b.*\(|\bdeclare\b|\bexec\b.*\(|\bcast\b.*\() [NC,OR]
+    RewriteCond %{QUERY_STRING} (<script|javascript:|vbscript:|onload\s*=|onerror\s*=|onclick\s*=) [NC,OR]
+    RewriteCond %{QUERY_STRING} (\.\./\.\./|/etc/passwd|/proc/self) [NC,OR]
+    RewriteCond %{QUERY_STRING} (base64_encode|base64_decode|eval\s*\() [NC]
+    RewriteRule .* - [F,L]
+    
+    # Block common vulnerability scanners
+    RewriteCond %{HTTP_USER_AGENT} (nikto|sqlmap|openvas|nessus|w3af|acunetix|havij|appscan|webscarab|wpscan) [NC]
+    RewriteRule .* - [F,L]
+</IfModule>
+
+# ──────────────────────────────────────────────────────────────
+# REQUEST METHOD LIMITING
+# ──────────────────────────────────────────────────────────────
+
+# Only allow GET and POST
+<LimitExcept GET POST HEAD>
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order deny,allow
+        Deny from all
+    </IfModule>
+</LimitExcept>
+
+# ──────────────────────────────────────────────────────────────
+# PHP RUNTIME SETTINGS
+# ──────────────────────────────────────────────────────────────
+# Do not use php_value/php_flag here. This site may run through PHP-FPM,
+# LSAPI, or a host that forbids per-directory PHP directives; those lines can
+# turn the whole site into HTTP 500. Runtime-safe settings are applied from
+# includes/security.php and upload size is enforced again in PHP code.
+
+# ──────────────────────────────────────────────────────────────
+# UPLOAD DIRECTORY PROTECTION
+# ──────────────────────────────────────────────────────────────
+
+# Prevent PHP execution in upload directories
+<IfModule mod_rewrite.c>
+    RewriteRule ^assets/uploads/.*\.php$ - [F,L]
+</IfModule>

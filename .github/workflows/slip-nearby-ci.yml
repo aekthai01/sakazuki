@@ -1,0 +1,80 @@
+name: Bank Slip Provider CI
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - public_html/includes/functions.php
+      - public_html/includes/slip_nearby.php
+      - public_html/admin/settings.php
+      - public_html/admin/slipverify.php
+      - tests/slip_nearby_test.php
+      - .github/scripts/secret_guard.py
+      - .github/workflows/slip-nearby-ci.yml
+  pull_request:
+    branches:
+      - main
+    paths:
+      - public_html/includes/functions.php
+      - public_html/includes/slip_nearby.php
+      - public_html/admin/settings.php
+      - public_html/admin/slipverify.php
+      - tests/slip_nearby_test.php
+      - .github/scripts/secret_guard.py
+      - .github/workflows/slip-nearby-ci.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: curl, json, mbstring, mysqli, fileinfo
+          coverage: none
+
+      - name: Guard committed secrets
+        run: python3 .github/scripts/secret_guard.py
+
+      - name: Lint bank-slip provider files
+        shell: bash
+        run: |
+          set -euo pipefail
+          php -l public_html/includes/functions.php
+          php -l public_html/includes/slip_nearby.php
+          php -l public_html/admin/settings.php
+          php -l tests/slip_nearby_test.php
+
+      - name: Guard main-flow integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q "require_once __DIR__ . '/slip_nearby.php';" public_html/includes/functions.php
+          test "$(grep -Fc 'verifySlipWithConfiguredProvider($imageBase64, $verificationRemark, [' public_html/includes/functions.php)" -eq 2
+          grep -q "slip_verification_provider" public_html/admin/settings.php
+          grep -q "slipverify_nearby_api_key" public_html/admin/settings.php
+          grep -q "easyslip_receiver_name" public_html/admin/settings.php
+          grep -q "easyslip_account_number" public_html/admin/settings.php
+          if grep -Eq "slipverify_nearby_(receiver_name|bank_code|account_no)" public_html/admin/settings.php; then
+            echo "Nearby must reuse the existing store receiver settings."
+            exit 1
+          fi
+          test ! -e public_html/admin/slipverify.php
+          test ! -e .github/workflows/slipverify-production-deploy.yml
+
+      - name: Run Nearby provider contract tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          php tests/slip_nearby_test.php

@@ -1,0 +1,51 @@
+<?php
+/**
+ * Copy to private/cheatgame.php and fill values from the CHEATGAME dashboard.
+ * Keep this file outside public_html.
+ */
+return [
+    'endpoint' => 'https://cheatgame.online/reseller_api.php',
+    'api_key' => '',
+    'webhook_secret' => '',
+    // Optional but strongly recommended: set the SAME random secret on both owned
+    // websites. It protects internal shared-ledger HMAC calls separately from
+    // reseller API credentials. Existing installs fall back to webhook_secret.
+    'shared_ledger_secret' => '',
+    // CHEATGAME currently returns image as a bare filename. Set the exact HTTPS
+    // image folder supplied by CHEATGAME, for example https://host/path/.
+    // Leave blank until the provider confirms it; the integration will not guess.
+    'product_image_base_url' => '',
+    'allowed_server_ip' => '',
+    'connect_timeout' => 8,
+    'request_timeout' => 25,
+    // Required while Allowed Server IP is an IPv4 address.
+    'force_ipv4' => true,
+
+    // The same private config can be copied to both websites. Selection uses
+    // the connected database suffix first, then the exact host name.
+    'site_profiles' => [
+        'SAK-010' => [
+            'site_code' => 'SAK',
+            'database_code' => '010',
+            'database_suffix' => '_010',
+            'hosts' => ['sakazuki.spwz.online'],
+            'live_order_enabled' => true,
+            'webhook_role' => 'hub',
+        ],
+        'ONL-005' => [
+            'site_code' => 'ONL',
+            'database_code' => '005',
+            'database_suffix' => '_005',
+            'hosts' => ['online.spwz.online'],
+            'live_order_enabled' => false,
+            'webhook_role' => 'receiver',
+        ],
+    ],
+    'webhook_public_url' => 'https://sakazuki.spwz.online/webhook_cheatgame.php',
+    'webhook_routes' => [
+        'SAK-010' => 'local',
+        'ONL-005' => 'https://online.spwz.online/webhook_cheatgame.php',
+    ],
+    'webhook_forward_connect_timeout' => 5,
+    'webhook_forward_timeout' => 15,
+];

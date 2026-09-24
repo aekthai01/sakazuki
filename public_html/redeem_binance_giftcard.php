@@ -4,8 +4,9 @@ ob_start();
 require_once __DIR__ . '/includes/auth.php';
 require_once __DIR__ . '/includes/ranking.php';
 require_once __DIR__ . '/includes/binance_giftcard.php';
-requireLogin();
+requireLogin(true);
 requireActive();
+accountVerificationRequireComplete(true);
 
 if (!headers_sent()) {
     header('Content-Type: application/json; charset=utf-8');

@@ -132,7 +132,10 @@ jobs:
             fi
           done
 
-          find backup -type f -print0 | sort -z | xargs -0 -r sha256sum > backup/sha256sums.txt
+          : > backup/sha256sums.txt
+          for path in backup/admin/slipverify.php backup/includes/slip_nearby.php; do
+            if [ -f "$path" ]; then sha256sum "$path" >> backup/sha256sums.txt; fi
+          done
           printf 'Previous Git source: %s\nDeploy commit: %s\n' "$BASE_SHA" "$GITHUB_SHA" > backup/manifest.txt
 
       - name: Upload pre-deploy backup evidence

@@ -32,7 +32,6 @@ jobs:
           git show refs/remotes/origin/nearby-reviewed:public_html/includes/slip_nearby.php > public_html/includes/slip_nearby.php
           git show refs/remotes/origin/nearby-reviewed:tests/slip_nearby_test.php > tests/slip_nearby_test.php
           rm -f public_html/admin/slipverify.php
-          rm -f .github/workflows/slipverify-production-deploy.yml
 
       - name: Prepatch reviewed settings heading
         run: python3 .github/scripts/prepatch_nearby_heading.py
@@ -40,7 +39,13 @@ jobs:
       - name: Build reviewed main-flow integration
         id: build
         continue-on-error: true
-        run: python3 .github/scripts/sync_nearby_main.py
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/sync_nearby_main.py
+          # Workflow files are updated later through the connected GitHub app,
+          # because GITHUB_TOKEN intentionally has no workflows permission.
+          git checkout -- .github/workflows/slip-nearby-ci.yml
 
       - name: Upload generated settings diagnostic
         if: steps.build.outcome == 'failure'
@@ -72,16 +77,14 @@ jobs:
           php tests/slip_nearby_test.php
           python3 .github/scripts/secret_guard.py
           test ! -e public_html/admin/slipverify.php
-          test ! -e .github/workflows/slipverify-production-deploy.yml
           git diff --check
 
-      - name: Commit integration branch
+      - name: Commit application integration only
         shell: bash
         run: |
           set -euo pipefail
           rm -f .github/scripts/prepatch_nearby_heading.py
           rm -f .github/scripts/sync_nearby_main.py
-          rm -f .github/workflows/nearby-main-sync-once.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A

@@ -5,6 +5,28 @@
 /private/*_secret.php
 /private/*.lock
 
+# Local secret/config files
+.env
+.env.*
+!.env.example
+!.env.sample
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Archives, dumps, and ad-hoc backups should never carry runtime secrets into Git
+*.tar
+*.tar.gz
+*.tgz
+*.tar.xz
+*.zip
+*.7z
+*.rar
+*.bak
+*.dump
+*.sql.gz
+
 # Runtime/cache state
 /public_html/assets/uploads/products/
 /private/purchase_activity_cache_v4.json

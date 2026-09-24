@@ -102,7 +102,7 @@ function sakazukiWriteOptimizedProductImage(
     string $prefix = 'opt_',
     int $maxDimension = 1024
 ): array {
-    $failed = ['success' => false, 'filename' => '', 'mime' => '', 'width' => 0, 'height' => 0, 'optimized' => false];
+    $failed = ['success' => false, 'filename' => '', 'mime' => '', 'width' => 0, 'height' => 0, 'optimized' => false, 'reason' => ''];
     if ($bytes === '' || strlen($bytes) > 8 * 1024 * 1024) return $failed;
     $info = @getimagesizefromstring($bytes);
     if (!is_array($info) || empty($info[0]) || empty($info[1])) return $failed;
@@ -117,6 +117,13 @@ function sakazukiWriteOptimizedProductImage(
     // validated original GIF through their compatibility fallback.
     if ($mime === 'image/gif') return $failed;
     $maxDimension = max(320, min(1600, $maxDimension));
+    if (function_exists('sakazukiProductImageOptimizationMemoryPlan')) {
+        $memoryPlan = sakazukiProductImageOptimizationMemoryPlan($width, $height, strlen($bytes), $maxDimension);
+        if (empty($memoryPlan['safe'])) {
+            $failed['reason'] = 'memory_budget';
+            return $failed;
+        }
+    }
     if (!is_dir($directory) && !@mkdir($directory, 0755, true) && !is_dir($directory)) return $failed;
     if (!is_writable($directory)) return $failed;
     if (!function_exists('imagecreatefromstring')) return $failed;
@@ -191,7 +198,7 @@ function sakazukiWriteOptimizedProductImage(
  * Incrementally converts oversized legacy product uploads in the background.
  * The cursor keeps each cron run bounded for shared/rented hosting.
  */
-function sakazukiOptimizeLegacyProductImages(int $maxConverted = 3): array
+function sakazukiOptimizeLegacyProductImages(int $maxConverted = 1): array
 {
     global $conn;
     $maxConverted = max(1, min(8, $maxConverted));
@@ -215,6 +222,8 @@ function sakazukiOptimizeLegacyProductImages(int $maxConverted = 3): array
     $uploadDir = $publicRoot . '/assets/uploads/products/';
     $converted = 0;
     $scanned = 0;
+    $memorySkipped = 0;
+    $oversizeSkipped = 0;
     $lastId = $cursor;
     foreach ($rows as $row) {
         $id = max(0, (int) ($row['id'] ?? 0));
@@ -230,14 +239,31 @@ function sakazukiOptimizeLegacyProductImages(int $maxConverted = 3): array
         if (!is_array($info) || empty($info[0]) || empty($info[1])) continue;
         $width = (int) $info[0];
         $height = (int) $info[1];
+        if ($size < 1 || $size > 8 * 1024 * 1024
+            || $width < 1 || $height < 1 || $width > 6000 || $height > 6000
+            || $width * $height > 24000000) {
+            $oversizeSkipped++;
+            continue;
+        }
         $extension = strtolower((string) pathinfo($source, PATHINFO_EXTENSION));
         // Already small enough for storefront cards and detail views.
         if ($width <= 1024 && $height <= 1024 && $size > 0 && $size <= 360 * 1024 && $extension === 'webp') continue;
         if ($width <= 1024 && $height <= 1024 && $size > 0 && $size <= 260 * 1024) continue;
+        if (function_exists('sakazukiProductImageOptimizationMemoryPlan')) {
+            $memoryPlan = sakazukiProductImageOptimizationMemoryPlan($width, $height, max(0, $size), 1024);
+            if (empty($memoryPlan['safe'])) {
+                $memorySkipped++;
+                continue;
+            }
+        }
         $bytes = @file_get_contents($source);
         if (!is_string($bytes) || $bytes === '') continue;
         $optimized = sakazukiWriteOptimizedProductImage($bytes, $uploadDir, 'opt_', 1024);
-        if (empty($optimized['success']) || empty($optimized['filename'])) continue;
+        unset($bytes);
+        if (empty($optimized['success']) || empty($optimized['filename'])) {
+            if (($optimized['reason'] ?? '') === 'memory_budget') $memorySkipped++;
+            continue;
+        }
         $newRelative = 'assets/uploads/products/' . $optimized['filename'];
         $update = $conn->prepare('UPDATE products SET image=?,updated_at=NOW() WHERE id=? AND image=?');
         if (!$update) { @unlink($uploadDir . $optimized['filename']); continue; }
@@ -250,17 +276,26 @@ function sakazukiOptimizeLegacyProductImages(int $maxConverted = 3): array
             sakazukiDeleteManagedProductImageIfUnreferenced($oldRelative);
         }
         $converted++;
+        if (function_exists('gc_collect_cycles')) gc_collect_cycles();
         if ($converted >= $maxConverted) break;
     }
 
     $reachedEnd = count($rows) < $scanLimit && $converted < $maxConverted;
     upsertSetting('product_image_optimizer_cursor', (string) ($reachedEnd ? 0 : $lastId));
+    $message = $memorySkipped > 0
+        ? ($converted > 0 ? 'Legacy product images optimized; memory-risk images skipped safely' : 'Memory-risk legacy product images skipped safely')
+        : ($converted > 0 ? 'Legacy product images optimized' : 'No legacy product images required optimization');
     return [
         'success' => true,
+        'message' => $message,
         'scanned' => $scanned,
         'converted' => $converted,
+        'memory_skipped' => $memorySkipped,
+        'oversize_skipped' => $oversizeSkipped,
+        'memory_limit_bytes' => function_exists('sakazukiPhpMemoryLimitBytes') ? sakazukiPhpMemoryLimitBytes() : 0,
+        'memory_peak_bytes' => max(0, (int) memory_get_peak_usage(true)),
         'completed_pass' => $reachedEnd,
-        'next_interval_seconds' => $reachedEnd ? 21600 : ($converted > 0 ? 60 : 600),
+        'next_interval_seconds' => $reachedEnd ? 21600 : ($converted > 0 ? 300 : 900),
     ];
 }
 

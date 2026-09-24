@@ -38,6 +38,102 @@ if (!function_exists('sakazukiManagedProductImageFilesystemPath')) {
     }
 }
 
+if (!function_exists('sakazukiParsePhpIniBytes')) {
+    function sakazukiParsePhpIniBytes(string $value): int
+    {
+        $value = trim($value);
+        if ($value === '' || $value === '-1') return 0;
+        if (preg_match('/\A([0-9]+(?:\.[0-9]+)?)\s*([KMG]?)B?\z/iD', $value, $matches) !== 1) {
+            return max(0, (int) $value);
+        }
+        $number = (float) $matches[1];
+        $unit = strtoupper((string) ($matches[2] ?? ''));
+        $power = $unit === 'G' ? 3 : ($unit === 'M' ? 2 : ($unit === 'K' ? 1 : 0));
+        $bytes = $number * (1024 ** $power);
+        if (!is_finite($bytes) || $bytes >= PHP_INT_MAX) return PHP_INT_MAX;
+        return max(0, (int) floor($bytes));
+    }
+}
+
+if (!function_exists('sakazukiPhpMemoryLimitBytes')) {
+    function sakazukiPhpMemoryLimitBytes(): int
+    {
+        $raw = ini_get('memory_limit');
+        return sakazukiParsePhpIniBytes(is_string($raw) ? $raw : '');
+    }
+}
+
+if (!function_exists('sakazukiProductImageOptimizationMemoryPlan')) {
+    /**
+     * Estimate the additional memory needed before asking GD to decode
+     * a product image. The estimate is intentionally conservative: GD
+     * may keep decoded source/target buffers plus codec scratch memory
+     * at the same time. A 192 MiB soft ceiling also protects shared
+     * hosting even when PHP itself is configured with a larger limit.
+     *
+     * Optional memory/current values keep the calculation deterministic
+     * in regression tests without changing process ini settings.
+     *
+     * @return array{safe:bool,estimated_additional_bytes:int,memory_limit_bytes:int,effective_limit_bytes:int,current_usage_bytes:int,reserve_bytes:int,available_bytes:int,target_width:int,target_height:int}
+     */
+    function sakazukiProductImageOptimizationMemoryPlan(
+        int $width,
+        int $height,
+        int $fileSize,
+        int $maxDimension = 1024,
+        ?int $memoryLimitBytes = null,
+        ?int $currentUsageBytes = null
+    ): array {
+        $width = max(0, $width);
+        $height = max(0, $height);
+        $fileSize = max(0, $fileSize);
+        $maxDimension = max(320, min(1600, $maxDimension));
+        $limit = $memoryLimitBytes === null ? sakazukiPhpMemoryLimitBytes() : max(0, $memoryLimitBytes);
+        $current = $currentUsageBytes === null ? max(0, (int) memory_get_usage(true)) : max(0, $currentUsageBytes);
+        $softCeiling = 192 * 1024 * 1024;
+        $effectiveLimit = $limit > 0 ? min($limit, $softCeiling) : $softCeiling;
+        $reserve = max(16 * 1024 * 1024, intdiv($effectiveLimit, 8));
+
+        if ($width < 1 || $height < 1) {
+            return [
+                'safe' => false,
+                'estimated_additional_bytes' => PHP_INT_MAX,
+                'memory_limit_bytes' => $limit,
+                'effective_limit_bytes' => $effectiveLimit,
+                'current_usage_bytes' => $current,
+                'reserve_bytes' => $reserve,
+                'available_bytes' => max(0, $effectiveLimit - $current - $reserve),
+                'target_width' => 0,
+                'target_height' => 0,
+            ];
+        }
+
+        $scale = min(1.0, $maxDimension / max($width, $height));
+        $targetWidth = max(1, (int) round($width * $scale));
+        $targetHeight = max(1, (int) round($height * $scale));
+        // 8 bytes/pixel is deliberately above the raw 4-byte truecolor
+        // buffer to cover GD/libjpeg/libpng decode and resample overhead.
+        $sourceBytes = $width * $height * 8;
+        $targetBytes = $targetWidth * $targetHeight * 8;
+        $compressedCopies = $fileSize * 2;
+        $codecOverhead = 16 * 1024 * 1024;
+        $estimated = max(0, (int) ($sourceBytes + $targetBytes + $compressedCopies + $codecOverhead));
+        $available = max(0, $effectiveLimit - $current - $reserve);
+
+        return [
+            'safe' => $estimated <= $available,
+            'estimated_additional_bytes' => $estimated,
+            'memory_limit_bytes' => $limit,
+            'effective_limit_bytes' => $effectiveLimit,
+            'current_usage_bytes' => $current,
+            'reserve_bytes' => $reserve,
+            'available_bytes' => $available,
+            'target_width' => $targetWidth,
+            'target_height' => $targetHeight,
+        ];
+    }
+}
+
 if (!function_exists('sakazukiProductImageCountQuery')) {
     /** @param list<string> $paths */
     function sakazukiProductImageCountQuery(mysqli $conn, string $sql, array $paths): ?int

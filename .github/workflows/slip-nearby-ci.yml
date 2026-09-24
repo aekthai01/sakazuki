@@ -1,0 +1,39 @@
+name: SlipVerify Nearby CI
+
+on:
+  push:
+    branches:
+      - test/slipverify-nearby-20260924
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: curl, json, mbstring
+          coverage: none
+
+      - name: Lint SlipVerify probe files
+        shell: bash
+        run: |
+          set -euo pipefail
+          php -l public_html/includes/slip_nearby.php
+          php -l tests/slip_nearby_test.php
+
+      - name: Run SlipVerify contract tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          php tests/slip_nearby_test.php

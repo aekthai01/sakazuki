@@ -11,8 +11,9 @@ function nearbySlipValidateToken($token): string
 {
     if (!is_scalar($token)) return '';
     $token = trim((string) $token);
+    $token = preg_replace('/^Bearer\s+/i', '', $token) ?: '';
     if ($token === '' || strlen($token) > 4096 || preg_match('/[\x00-\x20\x7F]/', $token)) return '';
-    return preg_replace('/^Bearer\s+/i', '', $token) ?: '';
+    return $token;
 }
 
 function nearbySlipValidateReceiverOptions(array $options): array

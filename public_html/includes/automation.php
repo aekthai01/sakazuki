@@ -1296,6 +1296,17 @@ function automationJobDefinitions(): array
                 return keyHistoryCleanupRun(false);
             },
         ],
+        'product_image_cleanup' => [
+            'critical' => false,
+            // Reconcile filesystem uploads against database references. A 48h
+            // grace period prevents races with uploads and delayed sync work.
+            'interval' => 3600,
+            'callback' => static function (): array {
+                return function_exists('sakazukiCleanupOrphanedProductImages')
+                    ? sakazukiCleanupOrphanedProductImages(20, 172800)
+                    : ['success' => true, 'skipped' => true, 'message' => 'Product image cleanup is unavailable'];
+            },
+        ],
         'product_image_optimizer' => [
             'critical' => false,
             // Convert only a few legacy images per run so shared hosting never

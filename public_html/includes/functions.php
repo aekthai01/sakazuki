@@ -9,6 +9,7 @@ require_once __DIR__ . '/commerce_center.php';
 require_once __DIR__ . '/commerce_context.php';
 require_once __DIR__ . '/transaction_integrity.php';
 require_once __DIR__ . '/slip_debug.php';
+require_once __DIR__ . '/product_image_lifecycle.php';
 
 
 /**
@@ -245,8 +246,9 @@ function sakazukiOptimizeLegacyProductImages(int $maxConverted = 3): array
         $ok = $update->execute() && $update->affected_rows === 1;
         $update->close();
         if (!$ok) { @unlink($uploadDir . $optimized['filename']); continue; }
-        // Keep the old file. Other imported records may still reference it; a
-        // separate reference-aware cleanup can remove orphans safely later.
+        if (function_exists('sakazukiDeleteManagedProductImageIfUnreferenced')) {
+            sakazukiDeleteManagedProductImageIfUnreferenced($oldRelative);
+        }
         $converted++;
         if ($converted >= $maxConverted) break;
     }

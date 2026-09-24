@@ -6,6 +6,7 @@
 /private/*.lock
 
 # Runtime/cache state
+/public_html/assets/uploads/products/
 /private/purchase_activity_cache_v4.json
 /public_html/includes/exchange_rate_cache.json
 **/error_log

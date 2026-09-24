@@ -1,13 +1,11 @@
-name: SlipVerify Nearby CI
+name: Bank Slip Provider CI
 
 on:
-  push:
-    branches:
-      - fix/slipverify-use-store-receiver-20260924
   pull_request:
     paths:
+      - "public_html/includes/functions.php"
       - "public_html/includes/slip_nearby.php"
-      - "public_html/admin/slipverify.php"
+      - "public_html/admin/settings.php"
       - "tests/slip_nearby_test.php"
       - ".github/workflows/slip-nearby-ci.yml"
   workflow_dispatch:
@@ -31,28 +29,29 @@ jobs:
           extensions: curl, json, mbstring, mysqli, fileinfo
           coverage: none
 
-      - name: Lint SlipVerify probe files
+      - name: Lint bank-slip provider files
         shell: bash
         run: |
           set -euo pipefail
+          php -l public_html/includes/functions.php
           php -l public_html/includes/slip_nearby.php
-          php -l public_html/admin/slipverify.php
+          php -l public_html/admin/settings.php
           php -l tests/slip_nearby_test.php
 
-      - name: Guard single receiver source of truth
+      - name: Guard one receiver source of truth
         shell: bash
         run: |
           set -euo pipefail
-          file="public_html/admin/slipverify.php"
-          grep -q "getSetting('easyslip_receiver_name'" "$file"
-          grep -q "getSetting('easyslip_account_number'" "$file"
-          grep -q "getSetting('easyslip_bank_name'" "$file"
+          file="public_html/admin/settings.php"
+          grep -q "easyslip_receiver_name" "$file"
+          grep -q "easyslip_account_number" "$file"
           if grep -Eq "slipverify_nearby_(receiver_name|bank_code|account_no)" "$file"; then
-            echo "SlipVerify admin must not create a second receiver settings source."
+            echo "Nearby must reuse the existing store receiver settings."
             exit 1
           fi
+          test ! -e public_html/admin/slipverify.php
 
-      - name: Run SlipVerify API-key contract tests
+      - name: Run Nearby provider contract tests
         shell: bash
         run: |
           set -euo pipefail

@@ -423,6 +423,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         return $ok;
     };
 
+    $pendingProductImage = '';
     try {
         if ($action === 'add') {
             $name = is_scalar($_POST['name'] ?? null) ? trim((string) $_POST['name']) : '';
@@ -471,6 +472,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
 
             $image = handleProductImageUpload('image_file', '');
+            if ($image !== '') $pendingProductImage = $image;
             $conn->begin_transaction();
             $stmt = $conn->prepare("INSERT INTO products (name, description, image, category, download_url, status) VALUES (?, ?, ?, ?, ?, 'active')");
             if (!$stmt) throw new RuntimeException('Unable to prepare product insert');
@@ -497,6 +499,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $variantStmt->close();
             }
             $conn->commit();
+            $pendingProductImage = '';
             $success = Lang::t('admin.products.success.add');
             $postRedirectAnchor = 'product-' . $productId;
             logHistory((int) $_SESSION['user_id'], 'add_product', 'Added product ID: ' . $productId);
@@ -521,7 +524,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
 
             // Never trust old_image from POST. The current path comes from the database.
-            $image = handleProductImageUpload('image_file', (string) ($current['image'] ?? ''));
+            $oldProductImage = (string) ($current['image'] ?? '');
+            $image = handleProductImageUpload('image_file', $oldProductImage);
+            if ($image !== $oldProductImage) $pendingProductImage = $image;
             $conn->begin_transaction();
             $stmt = $conn->prepare('UPDATE products SET name = ?, description = ?, image = ?, category = ?, download_url = ?, updated_at = NOW() WHERE id = ?');
             if (!$stmt) throw new RuntimeException('Unable to prepare product update');
@@ -556,6 +561,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
 
             $conn->commit();
+            $pendingProductImage = '';
+            if ($image !== $oldProductImage && function_exists('sakazukiDeleteManagedProductImageIfUnreferenced')) {
+                sakazukiDeleteManagedProductImageIfUnreferenced($oldProductImage);
+            }
             $success = Lang::t('admin.products.success.edit');
             $postRedirectAnchor = 'product-' . $productId;
             logHistory((int) $_SESSION['user_id'], 'edit_product', 'Edited product ID: ' . $productId);
@@ -996,10 +1005,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     } catch (InvalidArgumentException $e) {
         try { $conn->rollback(); } catch (Throwable $ignored) {}
+        if ($pendingProductImage !== '' && function_exists('sakazukiDeleteManagedProductImageIfUnreferenced')) {
+            sakazukiDeleteManagedProductImageIfUnreferenced($pendingProductImage);
+            $pendingProductImage = '';
+        }
         $error = $e->getMessage();
         if (isAjaxRequest()) jsonResponse(['ok' => false, 'error' => $error], 422);
     } catch (Throwable $e) {
         try { $conn->rollback(); } catch (Throwable $ignored) {}
+        if ($pendingProductImage !== '' && function_exists('sakazukiDeleteManagedProductImageIfUnreferenced')) {
+            sakazukiDeleteManagedProductImageIfUnreferenced($pendingProductImage);
+            $pendingProductImage = '';
+        }
         error_log('Product administration failed: ' . $e->getMessage());
         $error = productsUiText('ไม่สามารถดำเนินการได้ และไม่มีการบันทึกการเปลี่ยนแปลง', 'The operation could not be completed. No changes were saved.');
         if (isAjaxRequest()) jsonResponse(['ok' => false, 'error' => $error], 500);

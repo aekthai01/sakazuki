@@ -1,13 +1,8 @@
 name: Bank Slip Provider CI
 
+# GitHub Actions minutes are exhausted for the current billing cycle.
+# Keep this workflow manual-only until the owner re-enables automatic CI.
 on:
-  pull_request:
-    paths:
-      - "public_html/includes/functions.php"
-      - "public_html/includes/slip_nearby.php"
-      - "public_html/admin/settings.php"
-      - "tests/slip_nearby_test.php"
-      - ".github/workflows/slip-nearby-ci.yml"
   workflow_dispatch:
 
 permissions:

@@ -18,4 +18,10 @@ new = '''                        <!-- Bank Slip Verification Settings -->
 count = text.count(old)
 if count != 1:
     raise SystemExit(f'settings section heading: expected exactly 1 match, got {count}')
-path.write_text(text.replace(old, new, 1), encoding='utf-8')
+text = text.replace(old, new, 1)
+blank_old = "                                <span class=\"text-gray-300\" data-lang=\"admin.settings.easyslip_enabled\"><?php echo Lang::t('admin.settings.easyslip_enabled'); ?></span>\n                            </div>\n\n                            <div>"
+blank_new = "                                <span class=\"text-gray-300\" data-lang=\"admin.settings.easyslip_enabled\"><?php echo Lang::t('admin.settings.easyslip_enabled'); ?></span>\n                            </div>\n\n\n                            <div>"
+count = text.count(blank_old)
+if count != 1:
+    raise SystemExit(f'settings provider spacing: expected exactly 1 match, got {count}')
+path.write_text(text.replace(blank_old, blank_new, 1), encoding='utf-8')

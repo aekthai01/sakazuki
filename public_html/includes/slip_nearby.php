@@ -1,9 +1,11 @@
 <?php
 /**
- * xNearby SlipVerify API adapter used for isolated evaluation before production integration.
+ * xNearby SlipVerify v2 provider adapter.
  *
- * Authentication follows xNearby API Key mode (X-API-Key). Legacy Bearer JWT auth is
- * intentionally unsupported because the provider has retired it.
+ * Authentication uses X-API-Key. Legacy Bearer JWT auth is intentionally not
+ * supported because xNearby retired it. This adapter only verifies/normalizes
+ * provider data; wallet crediting and duplicate enforcement remain in the
+ * existing Sakazuki deposit pipeline and cross-site shared ledger.
  */
 
 function nearbySlipValidateApiKey($apiKey): string
@@ -22,7 +24,7 @@ function nearbySlipAuthHeaders(string $apiKey): array
     return [
         'X-API-Key: ' . $apiKey,
         'Accept: application/json',
-        'User-Agent: Sakazuki-SlipVerify-Probe/2.0',
+        'User-Agent: Sakazuki-SlipProvider/3.0',
     ];
 }
 
@@ -37,6 +39,45 @@ function nearbySlipValidateReceiverOptions(array $options): array
         $clean[$key] = $value;
     }
     return $clean;
+}
+
+/**
+ * Decode the same base64/data-URI shape accepted by the existing deposit flow.
+ * MIME is derived from the decoded bytes, never trusted from the data URI.
+ *
+ * @return array{success:bool,bytes?:string,mime?:string,error_code?:string,message?:string}
+ */
+function nearbySlipDecodeBase64Image(string $imageBase64): array
+{
+    $imageBase64 = trim($imageBase64);
+    if ($imageBase64 === '' || strlen($imageBase64) > 6 * 1024 * 1024) {
+        return ['success' => false, 'error_code' => 'invalid_image_payload', 'message' => 'Slip image is missing or too large'];
+    }
+    if (preg_match('#^data:[^;,]+;base64,(.+)$#s', $imageBase64, $m)) {
+        $imageBase64 = $m[1];
+    }
+    $bytes = base64_decode($imageBase64, true);
+    if (!is_string($bytes) || $bytes === '' || strlen($bytes) > 4 * 1024 * 1024) {
+        return ['success' => false, 'error_code' => 'invalid_image_payload', 'message' => 'Slip image base64 is invalid or too large'];
+    }
+
+    $mime = '';
+    if (function_exists('finfo_open')) {
+        $finfo = finfo_open(FILEINFO_MIME_TYPE);
+        if ($finfo) {
+            $detected = finfo_buffer($finfo, $bytes);
+            finfo_close($finfo);
+            if (is_string($detected)) $mime = strtolower(trim($detected));
+        }
+    }
+    if ($mime === '' && function_exists('getimagesizefromstring')) {
+        $info = @getimagesizefromstring($bytes);
+        if (is_array($info) && isset($info['mime'])) $mime = strtolower(trim((string) $info['mime']));
+    }
+    if (!in_array($mime, ['image/jpeg', 'image/png', 'image/webp'], true)) {
+        return ['success' => false, 'error_code' => 'invalid_image_mime', 'message' => 'SlipVerify supports JPEG, PNG, and WebP'];
+    }
+    return ['success' => true, 'bytes' => $bytes, 'mime' => $mime];
 }
 
 function nearbySlipNormalizeParty($party): array
@@ -121,12 +162,18 @@ function nearbySlipNormalizeSuccessResponse(array $response): array
             'transfer_date' => $normalizedDate,
             'sender_name' => $sender['name'],
             'sender_account' => $sender['account_no'],
+            // Existing slip_deposits.bank_code stores the sending bank code.
+            'bank_code' => $sender['bank_code'] !== '' ? $sender['bank_code'] : $sender['bank_abbr'],
             'sender_bank_code' => $sender['bank_code'],
             'sender_bank_abbr' => $sender['bank_abbr'],
             'receiver_name' => $receiver['name'],
             'receiver_account' => $receiver['account_no'],
             'receiver_bank_code' => $receiver['bank_code'],
             'receiver_bank_abbr' => $receiver['bank_abbr'],
+            // Optional EasySlip-only fields intentionally remain absent/empty.
+            // Local validation already treats missing country/currency as unknown.
+            'verification_remark' => '',
+            'is_duplicate' => false,
         ],
     ];
 }
@@ -141,13 +188,27 @@ function nearbySlipClassifyError(int $httpCode, array $response = [], int $curlE
     if ($curlErrno !== 0) {
         $timeoutErrno = defined('CURLE_OPERATION_TIMEDOUT') ? (int) CURLE_OPERATION_TIMEDOUT : 28;
         $isTimeout = $curlErrno === $timeoutErrno || $curlErrno === 28;
+        if ($isTimeout) {
+            // A timeout can happen after the multipart body reached xNearby. Do
+            // not automatically resend an ambiguous financial verification.
+            return [
+                'success' => false,
+                'pending' => true,
+                'error_code' => 'provider_outcome_unknown',
+                'provider_code' => '',
+                'retryable' => false,
+                'provider_http_code' => $httpCode,
+                'message' => 'SlipVerify request timed out after submission; outcome is unknown',
+                'transport_error' => substr($curlError, 0, 200),
+            ];
+        }
         return [
             'success' => false,
-            'error_code' => $isTimeout ? 'provider_timeout' : 'provider_connection',
+            'error_code' => 'provider_connection',
             'provider_code' => '',
             'retryable' => true,
             'provider_http_code' => 0,
-            'message' => $isTimeout ? 'SlipVerify timed out' : 'SlipVerify connection failed',
+            'message' => 'SlipVerify connection failed',
             'transport_error' => substr($curlError, 0, 200),
         ];
     }
@@ -289,7 +350,7 @@ function nearbySlipVerifyV2(
         return ['success' => false, 'error_code' => 'invalid_image_payload', 'retryable' => false, 'message' => 'Slip image is missing or too large'];
     }
     if (!in_array($mime, ['image/jpeg', 'image/png', 'image/webp'], true)) {
-        return ['success' => false, 'error_code' => 'invalid_image_mime', 'retryable' => false, 'message' => 'SlipVerify v2 probe supports JPEG, PNG, and WebP'];
+        return ['success' => false, 'error_code' => 'invalid_image_mime', 'retryable' => false, 'message' => 'SlipVerify supports JPEG, PNG, and WebP'];
     }
 
     $transport = $transport ?? 'nearbySlipHttpV2';
@@ -298,7 +359,13 @@ function nearbySlipVerifyV2(
         return ['success' => false, 'error_code' => 'transport_contract', 'retryable' => false, 'message' => 'SlipVerify transport returned invalid data'];
     }
     if (!empty($network['response_too_large'])) {
-        return ['success' => false, 'error_code' => 'provider_response_too_large', 'retryable' => true, 'message' => 'SlipVerify response exceeded the safety limit'];
+        return [
+            'success' => false,
+            'pending' => true,
+            'error_code' => 'provider_outcome_unknown',
+            'retryable' => false,
+            'message' => 'SlipVerify response exceeded the safety limit after request submission',
+        ];
     }
 
     $httpCode = max(0, (int) ($network['http_code'] ?? 0));
@@ -309,10 +376,12 @@ function nearbySlipVerifyV2(
     $body = (string) ($network['body'] ?? '');
     $decoded = json_decode($body, true);
     if (!is_array($decoded)) {
+        $ambiguous = $httpCode === 200 || $httpCode >= 500 || $httpCode === 0;
         return [
             'success' => false,
-            'error_code' => 'provider_invalid_response',
-            'retryable' => $httpCode >= 500 || $httpCode === 0,
+            'pending' => $ambiguous,
+            'error_code' => $ambiguous ? 'provider_outcome_unknown' : 'provider_invalid_response',
+            'retryable' => !$ambiguous,
             'provider_http_code' => $httpCode,
             'message' => 'SlipVerify returned invalid JSON',
         ];
@@ -326,4 +395,31 @@ function nearbySlipVerifyV2(
     $normalized['provider_http_code'] = $httpCode;
     $normalized['provider_duration_ms'] = max(0, (int) ($network['duration_ms'] ?? 0));
     return $normalized;
+}
+
+/** Verify a base64/data-URI slip through the v2 adapter used by the main flow. */
+function nearbySlipVerifyBase64(
+    string $apiKey,
+    string $imageBase64,
+    array $receiverOptions = [],
+    int $timeoutMs = 45000,
+    ?callable $transport = null
+): array {
+    $decoded = nearbySlipDecodeBase64Image($imageBase64);
+    if (empty($decoded['success'])) {
+        return [
+            'success' => false,
+            'error_code' => (string) ($decoded['error_code'] ?? 'invalid_image_payload'),
+            'retryable' => false,
+            'message' => (string) ($decoded['message'] ?? 'Slip image is invalid'),
+        ];
+    }
+    return nearbySlipVerifyV2(
+        $apiKey,
+        (string) $decoded['bytes'],
+        (string) $decoded['mime'],
+        $receiverOptions,
+        $timeoutMs,
+        $transport
+    );
 }

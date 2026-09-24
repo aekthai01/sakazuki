@@ -73,6 +73,18 @@ $outsideResult = sakazukiDeleteManagedProductImageIfUnreferenced(
 image_lifecycle_assert(empty($outsideResult['deleted']), 'unmanaged traversal path must not delete anything');
 image_lifecycle_assert(is_file($outside), 'outside file must remain intact');
 
+$automationRunner = file_get_contents(__DIR__ . '/../public_html/automation_runner.php');
+image_lifecycle_assert(
+    is_string($automationRunner)
+        && strpos($automationRunner, "$maintenanceJobs = ['cgo_catalog','shared_history','shared_binance_history','commerce_center','history_cleanup','product_image_cleanup','product_image_optimizer'];") !== false,
+    'maintenance runner must schedule product image cleanup and optimizer jobs'
+);
+image_lifecycle_assert(
+    is_string($automationRunner)
+        && strpos($automationRunner, "'product_image_cleanup','product_image_optimizer','admin_transaction_indexes'") !== false,
+    'maintenance runner fatal-stage allowlist must include product image jobs'
+);
+
 @unlink($outside);
 @rmdir($uploadDir);
 @rmdir(dirname($uploadDir));

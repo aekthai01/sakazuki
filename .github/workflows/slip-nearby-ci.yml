@@ -1,15 +1,28 @@
-name: SlipVerify Nearby CI
+name: Bank Slip Provider CI
 
 on:
   push:
     branches:
-      - fix/slipverify-use-store-receiver-20260924
-  pull_request:
+      - main
     paths:
-      - "public_html/includes/slip_nearby.php"
-      - "public_html/admin/slipverify.php"
-      - "tests/slip_nearby_test.php"
-      - ".github/workflows/slip-nearby-ci.yml"
+      - public_html/includes/functions.php
+      - public_html/includes/slip_nearby.php
+      - public_html/admin/settings.php
+      - public_html/admin/slipverify.php
+      - tests/slip_nearby_test.php
+      - .github/scripts/secret_guard.py
+      - .github/workflows/slip-nearby-ci.yml
+  pull_request:
+    branches:
+      - main
+    paths:
+      - public_html/includes/functions.php
+      - public_html/includes/slip_nearby.php
+      - public_html/admin/settings.php
+      - public_html/admin/slipverify.php
+      - tests/slip_nearby_test.php
+      - .github/scripts/secret_guard.py
+      - .github/workflows/slip-nearby-ci.yml
   workflow_dispatch:
 
 permissions:
@@ -31,28 +44,36 @@ jobs:
           extensions: curl, json, mbstring, mysqli, fileinfo
           coverage: none
 
-      - name: Lint SlipVerify probe files
+      - name: Guard committed secrets
+        run: python3 .github/scripts/secret_guard.py
+
+      - name: Lint bank-slip provider files
         shell: bash
         run: |
           set -euo pipefail
+          php -l public_html/includes/functions.php
           php -l public_html/includes/slip_nearby.php
-          php -l public_html/admin/slipverify.php
+          php -l public_html/admin/settings.php
           php -l tests/slip_nearby_test.php
 
-      - name: Guard single receiver source of truth
+      - name: Guard main-flow integration
         shell: bash
         run: |
           set -euo pipefail
-          file="public_html/admin/slipverify.php"
-          grep -q "getSetting('easyslip_receiver_name'" "$file"
-          grep -q "getSetting('easyslip_account_number'" "$file"
-          grep -q "getSetting('easyslip_bank_name'" "$file"
-          if grep -Eq "slipverify_nearby_(receiver_name|bank_code|account_no)" "$file"; then
-            echo "SlipVerify admin must not create a second receiver settings source."
+          grep -q "require_once __DIR__ . '/slip_nearby.php';" public_html/includes/functions.php
+          test "$(grep -Fc 'verifySlipWithConfiguredProvider($imageBase64, $verificationRemark, [' public_html/includes/functions.php)" -eq 2
+          grep -q "slip_verification_provider" public_html/admin/settings.php
+          grep -q "slipverify_nearby_api_key" public_html/admin/settings.php
+          grep -q "easyslip_receiver_name" public_html/admin/settings.php
+          grep -q "easyslip_account_number" public_html/admin/settings.php
+          if grep -Eq "slipverify_nearby_(receiver_name|bank_code|account_no)" public_html/admin/settings.php; then
+            echo "Nearby must reuse the existing store receiver settings."
             exit 1
           fi
+          test ! -e public_html/admin/slipverify.php
+          test ! -e .github/workflows/slipverify-production-deploy.yml
 
-      - name: Run SlipVerify API-key contract tests
+      - name: Run Nearby provider contract tests
         shell: bash
         run: |
           set -euo pipefail

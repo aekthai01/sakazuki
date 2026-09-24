@@ -423,3 +423,116 @@ function nearbySlipVerifyBase64(
         $transport
     );
 }
+
+/** Return the configured live bank-slip provider. Unknown values fail back to EasySlip. */
+function slipVerificationConfiguredProvider(): string
+{
+    if (!function_exists('getSetting')) return 'easyslip';
+    $provider = strtolower(trim((string) getSetting('slip_verification_provider', 'easyslip')));
+    return $provider === 'nearby' ? 'nearby' : 'easyslip';
+}
+
+/** Build xNearby receiver validation from the existing single store account source. */
+function nearbySlipConfiguredReceiverOptions(): array
+{
+    if (!function_exists('getSetting')) return [];
+    $nameTh = trim((string) getSetting('easyslip_receiver_name', ''));
+    $nameEn = trim((string) getSetting('easyslip_receiver_name_en', ''));
+    $account = trim((string) getSetting('easyslip_account_number', ''));
+    $options = [];
+    $name = $nameTh !== '' ? $nameTh : $nameEn;
+    if ($name !== '') $options['expected_receiver_name'] = $name;
+    if ($account !== '') $options['expected_account_no'] = $account;
+    // Store settings currently keep a bank name, not an authoritative bank code.
+    // Do not guess expected_bank_code from a display name.
+    return nearbySlipValidateReceiverOptions($options);
+}
+
+/**
+ * Provider router used by processSlipDeposit(). Both providers must return the
+ * same normalized contract. All wallet/shared-ledger decisions stay outside.
+ */
+function verifySlipWithConfiguredProvider($imageBase64, string $remark = '', array $debugContext = []): array
+{
+    $provider = slipVerificationConfiguredProvider();
+    if ($provider !== 'nearby') {
+        $result = verifySlipWithEasyslip($imageBase64, $remark, $debugContext);
+        if (is_array($result)) $result['provider'] = 'easyslip';
+        return is_array($result) ? $result : [
+            'success' => false,
+            'error_code' => 'provider_contract',
+            'retryable' => false,
+            'message' => 'EasySlip provider returned invalid data',
+        ];
+    }
+
+    if (!function_exists('getSetting')) {
+        return ['success' => false, 'error_code' => 'provider_config', 'retryable' => false, 'message' => 'Slip provider settings are unavailable'];
+    }
+    $apiKey = nearbySlipValidateApiKey((string) getSetting('slipverify_nearby_api_key', ''));
+    if ($apiKey === '') {
+        return ['success' => false, 'error_code' => 'missing_api_key', 'retryable' => false, 'message' => 'SlipVerify API key is not configured'];
+    }
+
+    $diagnosticOnly = !empty($debugContext['diagnostic_only']);
+    $slipHash = isset($debugContext['slip_hash']) && is_scalar($debugContext['slip_hash'])
+        ? strtolower(trim((string) $debugContext['slip_hash'])) : '';
+    if (!$diagnosticOnly && preg_match('/^[a-f0-9]{64}$/D', $slipHash) === 1 && function_exists('slipVerificationMarkProviderRequest')) {
+        slipVerificationMarkProviderRequest($slipHash);
+    }
+
+    $timeoutMs = 45000;
+    $deadline = isset($debugContext['deadline']) && is_numeric($debugContext['deadline'])
+        ? (float) $debugContext['deadline'] : 0.0;
+    if ($deadline > 0.0 && function_exists('slipVerificationDeadlineRemainingMs')) {
+        $remaining = (int) slipVerificationDeadlineRemainingMs($deadline);
+        // Leave room for durable snapshot storage and the existing completion path.
+        $timeoutMs = max(1000, min(45000, $remaining - 1500));
+        if ($remaining <= 2500) {
+            return [
+                'success' => false,
+                'error_code' => 'customer_deadline_exceeded',
+                'retryable' => true,
+                'retry_after_seconds' => 3,
+                'message' => 'Not enough request time remains to start SlipVerify safely',
+            ];
+        }
+    }
+
+    $slotName = '';
+    if (function_exists('slipProviderAcquireConcurrencySlot')) {
+        $slot = slipProviderAcquireConcurrencySlot($apiKey);
+        if (empty($slot['success'])) {
+            return [
+                'success' => false,
+                'error_code' => 'provider_busy',
+                'retryable' => true,
+                'retry_after_seconds' => max(1, (int) ($slot['retry_after_seconds'] ?? 2)),
+                'message' => 'Slip verification is busy; retry the same slip shortly',
+            ];
+        }
+        $slotName = (string) ($slot['slot_name'] ?? '');
+    }
+
+    try {
+        $result = nearbySlipVerifyBase64(
+            $apiKey,
+            (string) $imageBase64,
+            nearbySlipConfiguredReceiverOptions(),
+            $timeoutMs
+        );
+    } finally {
+        if ($slotName !== '' && function_exists('slipProviderReleaseConcurrencySlot')) {
+            slipProviderReleaseConcurrencySlot($slotName);
+        }
+    }
+
+    if (!is_array($result)) {
+        return ['success' => false, 'error_code' => 'provider_contract', 'retryable' => false, 'message' => 'SlipVerify provider returned invalid data'];
+    }
+    $result['provider'] = 'nearby_slipverify';
+    if (!empty($result['success']) && is_array($result['data'] ?? null)) {
+        $result['data']['_provider'] = 'nearby_slipverify';
+    }
+    return $result;
+}

@@ -31,12 +31,25 @@ jobs:
           rm -f public_html/admin/slipverify.php
           rm -f .github/workflows/slipverify-production-deploy.yml
 
+      - name: Prepatch reviewed settings heading
+        run: python3 .github/scripts/prepatch_nearby_heading.py
+
       - name: Build reviewed main-flow integration
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 .github/scripts/prepatch_nearby_heading.py
-          python3 .github/scripts/sync_nearby_main.py
+        id: build
+        continue-on-error: true
+        run: python3 .github/scripts/sync_nearby_main.py
+
+      - name: Upload generated settings diagnostic
+        if: steps.build.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-settings-diagnostic
+          path: public_html/admin/settings.php
+          retention-days: 1
+
+      - name: Stop on reviewed hash mismatch
+        if: steps.build.outcome == 'failure'
+        run: exit 1
 
       - name: Setup PHP
         uses: shivammathur/setup-php@v2

@@ -1,0 +1,114 @@
+name: Product Image Optimizer Isolation Patch
+
+on:
+  push:
+    branches:
+      - fix/isolate-product-image-optimizer-20260924
+    paths:
+      - ".github/workflows/product-image-optimizer-isolation-patch.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  patch-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: curl, json, mbstring, mysqli, gd
+          coverage: none
+
+      - name: Isolate legacy optimizer from HTTP maintenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          runner_path = Path('public_html/automation_runner.php')
+          runner = runner_path.read_text()
+          old = "$maintenanceJobs = ['cgo_catalog','shared_history','shared_binance_history','commerce_center','history_cleanup','product_image_cleanup','product_image_optimizer'];\n$allowedJobs = $mode === 'critical' ? $criticalJobs : $maintenanceJobs;"
+          new = "$maintenanceJobs = ['cgo_catalog','shared_history','shared_binance_history','commerce_center','history_cleanup','product_image_cleanup'];\n// Legacy GD optimization is intentionally CLI-only. HTTP maintenance already\n// carries catalogue/history/diagnostic work in the same PHP process, so image\n// decoding here can exhaust shared-hosting memory even after a conservative\n// preflight. New uploads are optimized on write; the background HTTP runner\n// still performs reference-aware orphan cleanup without decoding image pixels.\nif ($isCli && $mode === 'maintenance') $maintenanceJobs[] = 'product_image_optimizer';\n$allowedJobs = $mode === 'critical' ? $criticalJobs : $maintenanceJobs;"
+          if runner.count(old) != 1:
+              raise SystemExit(f'expected one maintenance whitelist target, found {runner.count(old)}')
+          runner_path.write_text(runner.replace(old, new, 1))
+
+          test_path = Path('tests/product_image_lifecycle_test.php')
+          test = test_path.read_text()
+          old_test = """$maintenanceJobsNeedle = '$maintenanceJobs = [\\'cgo_catalog\\',\\'shared_history\\',\\'shared_binance_history\\',\\'commerce_center\\',\\'history_cleanup\\',\\'product_image_cleanup\\',\\'product_image_optimizer\\'];';
+image_lifecycle_assert(
+    is_string($automationRunner) && strpos($automationRunner, $maintenanceJobsNeedle) !== false,
+    'maintenance runner must schedule product image cleanup and optimizer jobs'
+);
+"""
+          new_test = """$maintenanceJobsNeedle = '$maintenanceJobs = [\\'cgo_catalog\\',\\'shared_history\\',\\'shared_binance_history\\',\\'commerce_center\\',\\'history_cleanup\\',\\'product_image_cleanup\\'];';
+image_lifecycle_assert(
+    is_string($automationRunner) && strpos($automationRunner, $maintenanceJobsNeedle) !== false,
+    'HTTP maintenance runner must keep reference-aware product image cleanup enabled'
+);
+image_lifecycle_assert(
+    is_string($automationRunner)
+        && strpos($automationRunner, \"if ($isCli && $mode === 'maintenance') $maintenanceJobs[] = 'product_image_optimizer';\") !== false,
+    'legacy product image optimizer must be isolated to CLI maintenance'
+);
+image_lifecycle_assert(
+    is_string($automationRunner)
+        && strpos($automationRunner, \"$maintenanceJobs = ['cgo_catalog','shared_history','shared_binance_history','commerce_center','history_cleanup','product_image_cleanup','product_image_optimizer'];\") === false,
+    'HTTP maintenance whitelist must not directly include the GD optimizer'
+);
+"""
+          if test.count(old_test) != 1:
+              raise SystemExit(f'expected one lifecycle whitelist test target, found {test.count(old_test)}')
+          test_path.write_text(test.replace(old_test, new_test, 1))
+          PY
+
+      - name: Verify complete regression suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          runner = Path('public_html/automation_runner.php').read_text()
+          functions = Path('public_html/includes/functions.php').read_text()
+          automation = Path('public_html/includes/automation.php').read_text()
+          assert "$maintenanceJobs = ['cgo_catalog','shared_history','shared_binance_history','commerce_center','history_cleanup','product_image_cleanup'];" in runner
+          assert "if ($isCli && $mode === 'maintenance') $maintenanceJobs[] = 'product_image_optimizer';" in runner
+          assert "$maintenanceJobs = ['cgo_catalog','shared_history','shared_binance_history','commerce_center','history_cleanup','product_image_cleanup','product_image_optimizer'];" not in runner
+          assert 'sakazuki_direct_partial_jobs' in runner
+          assert 'sakazukiOptimizeLegacyProductImages(1)' in automation
+          assert 'sakazukiProductImageOptimizationMemoryPlan' in functions
+          print('HTTP optimizer isolation and memory safeguards verified')
+          PY
+          php tests/product_image_lifecycle_test.php
+          failures=0
+          count=0
+          while IFS= read -r -d '' file; do
+            count=$((count + 1))
+            if ! php -l "$file" >/tmp/php-lint.out 2>&1; then
+              cat /tmp/php-lint.out
+              failures=$((failures + 1))
+            fi
+          done < <(find public_html -type f -name '*.php' -print0)
+          echo "PHP files checked: $count"
+          test "$failures" -eq 0
+          for test_file in tests/*.php; do php "$test_file"; done
+          git diff --check
+
+      - name: Commit verified patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add public_html/automation_runner.php tests/product_image_lifecycle_test.php
+          git commit -m "Isolate product image optimizer from HTTP maintenance"
+          git push origin HEAD:fix/isolate-product-image-optimizer-20260924

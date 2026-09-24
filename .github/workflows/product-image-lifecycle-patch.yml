@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   apply-and-verify:
-    if: github.event.head_commit.message == 'Add product image lifecycle patch runner'
+    if: github.event.head_commit.message == 'Run product image lifecycle patch v2'
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -28,7 +28,14 @@ jobs:
           coverage: none
 
       - name: Apply lifecycle patch
-        run: python3 tools/apply_product_image_lifecycle_patch.py
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/apply_product_image_lifecycle_patch.py
+          # The existing CI workflow is unrelated to this feature and GitHub's
+          # workflow token cannot push workflow edits. Keep it byte-for-byte
+          # unchanged; this temporary verifier already runs the new regression.
+          git checkout -- .github/workflows/truemoney-byteindev-ci.yml
 
       - name: Check generated diff
         shell: bash
@@ -78,7 +85,7 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .gitignore .github/workflows/truemoney-byteindev-ci.yml \
+          git add .gitignore \
             public_html/includes/product_image_lifecycle.php \
             public_html/includes/functions.php \
             public_html/includes/automation.php \

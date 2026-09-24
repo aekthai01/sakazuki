@@ -32,7 +32,11 @@ jobs:
           rm -f .github/workflows/slipverify-production-deploy.yml
 
       - name: Build reviewed main-flow integration
-        run: python3 .github/scripts/sync_nearby_main.py
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/prepatch_nearby_heading.py
+          python3 .github/scripts/sync_nearby_main.py
 
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
@@ -59,6 +63,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          rm -f .github/scripts/prepatch_nearby_heading.py
           rm -f .github/scripts/sync_nearby_main.py
           rm -f .github/workflows/nearby-main-sync-once.yml
           git config user.name 'github-actions[bot]'

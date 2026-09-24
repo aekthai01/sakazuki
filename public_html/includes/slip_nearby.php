@@ -2,18 +2,28 @@
 /**
  * xNearby SlipVerify API adapter used for isolated evaluation before production integration.
  *
- * This module deliberately has no database or wallet dependencies. It validates the
- * documented SlipVerify v2 response and exposes a small canonical payload that can be
- * compared against the existing EasySlip integration without crediting customer funds.
+ * Authentication follows xNearby API Key mode (X-API-Key). Legacy Bearer JWT auth is
+ * intentionally unsupported because the provider has retired it.
  */
 
-function nearbySlipValidateToken($token): string
+function nearbySlipValidateApiKey($apiKey): string
 {
-    if (!is_scalar($token)) return '';
-    $token = trim((string) $token);
-    $token = preg_replace('/^Bearer\s+/i', '', $token) ?: '';
-    if ($token === '' || strlen($token) > 4096 || preg_match('/[\x00-\x20\x7F]/', $token)) return '';
-    return $token;
+    if (!is_scalar($apiKey)) return '';
+    $apiKey = trim((string) $apiKey);
+    if ($apiKey === '' || strlen($apiKey) < 12 || strlen($apiKey) > 512) return '';
+    if (preg_match('/[\x00-\x20\x7F]/', $apiKey)) return '';
+    return $apiKey;
+}
+
+function nearbySlipAuthHeaders(string $apiKey): array
+{
+    $apiKey = nearbySlipValidateApiKey($apiKey);
+    if ($apiKey === '') return [];
+    return [
+        'X-API-Key: ' . $apiKey,
+        'Accept: application/json',
+        'User-Agent: Sakazuki-SlipVerify-Probe/2.0',
+    ];
 }
 
 function nearbySlipValidateReceiverOptions(array $options): array
@@ -47,17 +57,12 @@ function nearbySlipNormalizeParty($party): array
         'name' => $string($party['name'] ?? ''),
         'bank_code' => $string($party['bank_code'] ?? '', 32),
         'bank_abbr' => $string($party['bank_abbr'] ?? '', 32),
-        'bank_name_th' => $string($party['bank_name_th'] ?? ''),
+        'bank_name_th' => $string($party['bank_name_th'] ?? ($party['bank'] ?? '')),
         'bank_name_en' => $string($party['bank_name_en'] ?? ''),
         'account_no' => $account,
     ];
 }
 
-/**
- * Normalize only fields documented by the official SlipVerify SDK types.
- * Country/currency are intentionally not invented here because the published v2
- * response contract does not expose those fields.
- */
 function nearbySlipNormalizeSuccessResponse(array $response): array
 {
     if (($response['status'] ?? null) !== 'success') {
@@ -154,7 +159,7 @@ function nearbySlipClassifyError(int $httpCode, array $response = [], int $curlE
             'provider_code' => $providerCode,
             'retryable' => false,
             'provider_http_code' => $httpCode,
-            'message' => $providerMessage !== '' ? $providerMessage : 'SlipVerify authentication failed',
+            'message' => $providerMessage !== '' ? $providerMessage : 'SlipVerify API key authentication failed',
         ];
     }
     if ($httpCode === 429 || ($httpCode >= 500 && $httpCode <= 599)) {
@@ -178,12 +183,8 @@ function nearbySlipClassifyError(int $httpCode, array $response = [], int $curlE
     ];
 }
 
-/**
- * Low-level HTTPS transport. The response body is capped at 1 MiB and redirects
- * are disabled so credentials cannot be forwarded to another origin.
- */
 function nearbySlipHttpV2(
-    string $token,
+    string $apiKey,
     string $imageBytes,
     string $mime,
     array $receiverOptions = [],
@@ -192,9 +193,9 @@ function nearbySlipHttpV2(
     if (!function_exists('curl_init') || !class_exists('CURLFile')) {
         return ['executed' => false, 'http_code' => 0, 'curl_errno' => -1, 'curl_error' => 'PHP cURL/CURLFile unavailable', 'body' => ''];
     }
-    $token = nearbySlipValidateToken($token);
-    if ($token === '') {
-        return ['executed' => false, 'http_code' => 0, 'curl_errno' => -2, 'curl_error' => 'Invalid SlipVerify token', 'body' => ''];
+    $apiKey = nearbySlipValidateApiKey($apiKey);
+    if ($apiKey === '') {
+        return ['executed' => false, 'http_code' => 0, 'curl_errno' => -2, 'curl_error' => 'Invalid SlipVerify API key', 'body' => ''];
     }
     if ($imageBytes === '' || strlen($imageBytes) > 4 * 1024 * 1024) {
         return ['executed' => false, 'http_code' => 0, 'curl_errno' => -3, 'curl_error' => 'Invalid image payload', 'body' => ''];
@@ -230,11 +231,7 @@ function nearbySlipHttpV2(
         $options = [
             CURLOPT_POST => true,
             CURLOPT_POSTFIELDS => $post,
-            CURLOPT_HTTPHEADER => [
-                'Authorization: Bearer ' . $token,
-                'Accept: application/json',
-                'User-Agent: Sakazuki-SlipVerify-Probe/1.0',
-            ],
+            CURLOPT_HTTPHEADER => nearbySlipAuthHeaders($apiKey),
             CURLOPT_RETURNTRANSFER => false,
             CURLOPT_HEADER => false,
             CURLOPT_FOLLOWLOCATION => false,
@@ -276,21 +273,17 @@ function nearbySlipHttpV2(
     }
 }
 
-/**
- * Verify one image with SlipVerify v2. Tests can inject transport and therefore
- * validate request/result behavior without a live token or paid EasySlip call.
- */
 function nearbySlipVerifyV2(
-    string $token,
+    string $apiKey,
     string $imageBytes,
     string $mime,
     array $receiverOptions = [],
     int $timeoutMs = 45000,
     ?callable $transport = null
 ): array {
-    $token = nearbySlipValidateToken($token);
-    if ($token === '') {
-        return ['success' => false, 'error_code' => 'missing_token', 'retryable' => false, 'message' => 'SlipVerify token is not configured'];
+    $apiKey = nearbySlipValidateApiKey($apiKey);
+    if ($apiKey === '') {
+        return ['success' => false, 'error_code' => 'missing_api_key', 'retryable' => false, 'message' => 'SlipVerify API key is not configured'];
     }
     if ($imageBytes === '' || strlen($imageBytes) > 4 * 1024 * 1024) {
         return ['success' => false, 'error_code' => 'invalid_image_payload', 'retryable' => false, 'message' => 'Slip image is missing or too large'];
@@ -300,7 +293,7 @@ function nearbySlipVerifyV2(
     }
 
     $transport = $transport ?? 'nearbySlipHttpV2';
-    $network = $transport($token, $imageBytes, $mime, nearbySlipValidateReceiverOptions($receiverOptions), $timeoutMs);
+    $network = $transport($apiKey, $imageBytes, $mime, nearbySlipValidateReceiverOptions($receiverOptions), $timeoutMs);
     if (!is_array($network)) {
         return ['success' => false, 'error_code' => 'transport_contract', 'retryable' => false, 'message' => 'SlipVerify transport returned invalid data'];
     }

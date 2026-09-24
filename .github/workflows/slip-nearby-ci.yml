@@ -3,7 +3,13 @@ name: SlipVerify Nearby CI
 on:
   push:
     branches:
-      - test/slipverify-nearby-20260924
+      - fix/slipverify-api-key-20260924
+  pull_request:
+    paths:
+      - "public_html/includes/slip_nearby.php"
+      - "public_html/admin/slipverify.php"
+      - "tests/slip_nearby_test.php"
+      - ".github/workflows/slip-nearby-ci.yml"
   workflow_dispatch:
 
 permissions:
@@ -33,7 +39,7 @@ jobs:
           php -l public_html/admin/slipverify.php
           php -l tests/slip_nearby_test.php
 
-      - name: Run SlipVerify contract tests
+      - name: Run SlipVerify API-key contract tests
         shell: bash
         run: |
           set -euo pipefail

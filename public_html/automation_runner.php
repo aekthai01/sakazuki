@@ -78,7 +78,7 @@ function automationDirectPublicResult(array $result, bool $critical, bool $verbo
             $message = trim((string) $result['message']);
             if ($message !== '') $public['message'] = substr($message, 0, 500);
         }
-        foreach (['attempted','processed','succeeded','updated','published','reconciled','failed','deleted','skipped','scanned','converted'] as $key) {
+        foreach (['attempted','processed','succeeded','updated','published','reconciled','failed','deleted','skipped','scanned','converted','memory_skipped','oversize_skipped','freed_bytes','completed_pass','next_interval_seconds','memory_limit_bytes','memory_peak_bytes'] as $key) {
             if (array_key_exists($key, $result) && is_scalar($result[$key])) {
                 $public[$key] = $result[$key];
             }
@@ -166,12 +166,20 @@ if (!$isCli) {
     @ini_set('html_errors', '0');
     $GLOBALS['sakazuki_direct_finished'] = false;
     $GLOBALS['sakazuki_direct_stage'] = 'startup';
-    register_shutdown_function(static function (): void {
+    $GLOBALS['sakazuki_direct_partial_jobs'] = [];
+    $GLOBALS['sakazuki_direct_partial_warnings'] = [];
+    $GLOBALS['sakazuki_direct_run_id'] = '';
+    $GLOBALS['sakazuki_direct_started_float'] = microtime(true);
+    // Keep a small block available so an OOM shutdown can free it before
+    // encoding a useful diagnostic response instead of dying twice.
+    $GLOBALS['sakazuki_direct_emergency_reserve'] = str_repeat('R', 262144);
+    register_shutdown_function(static function () use ($mode): void {
         if (!empty($GLOBALS['sakazuki_direct_finished'])) return;
         $last = error_get_last();
         if (!is_array($last)) return;
         $fatalTypes = [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR];
         if (!in_array((int) ($last['type'] ?? 0), $fatalTypes, true)) return;
+        unset($GLOBALS['sakazuki_direct_emergency_reserve']);
         $allowedStages = [
             'startup','schema','pending_orders','slip_reconciliation','cgo_inventory','supplier_catalog',
             'cgo_catalog','shared_history','shared_binance_history','commerce_center','history_cleanup','product_image_cleanup','product_image_optimizer','admin_transaction_indexes',
@@ -179,15 +187,28 @@ if (!$isCli) {
         ];
         $stage = (string) ($GLOBALS['sakazuki_direct_stage'] ?? 'unknown_job');
         if (!in_array($stage, $allowedStages, true)) $stage = 'unknown_job';
-        if (!headers_sent()) header('Content-Type: application/json; charset=utf-8');
-        http_response_code(500);
-        echo automationDirectJson([
+        $started = (float) ($GLOBALS['sakazuki_direct_started_float'] ?? microtime(true));
+        $payload = [
             'success' => false,
             'health' => 'failed',
             'code' => 'runner_fatal',
             'stage' => $stage,
             'reason' => automationDirectFatalReason($last),
-        ]);
+            'runner' => 'single_site_' . $mode,
+            'duration_ms' => max(0, (int) round((microtime(true) - $started) * 1000)),
+            'warnings' => array_values((array) ($GLOBALS['sakazuki_direct_partial_warnings'] ?? [])),
+            'jobs' => (array) ($GLOBALS['sakazuki_direct_partial_jobs'] ?? []),
+            'runtime' => [
+                'memory_limit_bytes' => function_exists('sakazukiPhpMemoryLimitBytes') ? sakazukiPhpMemoryLimitBytes() : 0,
+                'memory_usage_bytes' => max(0, (int) memory_get_usage(true)),
+                'memory_peak_bytes' => max(0, (int) memory_get_peak_usage(true)),
+            ],
+        ];
+        $runId = trim((string) ($GLOBALS['sakazuki_direct_run_id'] ?? ''));
+        if ($runId !== '') $payload['run_id'] = $runId;
+        if (!headers_sent()) header('Content-Type: application/json; charset=utf-8');
+        http_response_code(500);
+        echo automationDirectJson($payload);
     });
 }
 
@@ -207,6 +228,7 @@ if ($mode === 'maintenance') {
         $maintenanceRunId = gmdate('YmdHis') . '-' . substr(hash('sha256', microtime(true) . '|' . getmypid()), 0, 12);
     }
     $dbFingerprint = function_exists('automationDatabaseFingerprint') ? automationDatabaseFingerprint() : 'unknown';
+    if (!$isCli) $GLOBALS['sakazuki_direct_run_id'] = $maintenanceRunId;
     error_log('[maintenance][run] id=' . $maintenanceRunId . '; event=start; db=' . $dbFingerprint
         . '; auth=maintenance_hmac_sha256_v2');
 }
@@ -384,6 +406,8 @@ if ($mode === 'maintenance' && is_array($checkoutHealth) && empty($checkoutHealt
     $warnings[] = 'history_health';
 }
 
+if (!$isCli) $GLOBALS['sakazuki_direct_partial_warnings'] = $warnings;
+
 if ($schemaReady) {
     foreach ($allowedJobs as $jobName) {
         if (!isset($definitions[$jobName])) continue;
@@ -435,6 +459,10 @@ if ($schemaReady) {
         if (($result['success'] ?? true) === false) {
             if ($critical) $criticalFailures[] = $jobName;
             else $warnings[] = $jobName;
+        }
+        if (!$isCli) {
+            $GLOBALS['sakazuki_direct_partial_jobs'] = $results;
+            $GLOBALS['sakazuki_direct_partial_warnings'] = array_values(array_unique($warnings));
         }
     }
 }
@@ -512,11 +540,16 @@ $payload = [
     'jobs' => $results,
 ];
 if ($mode === 'maintenance') {
+    $payload['runtime'] = [
+        'memory_limit_bytes' => function_exists('sakazukiPhpMemoryLimitBytes') ? sakazukiPhpMemoryLimitBytes() : 0,
+        'memory_usage_bytes' => max(0, (int) memory_get_usage(true)),
+        'memory_peak_bytes' => max(0, (int) memory_get_peak_usage(true)),
+    ];
     $payload['run_id'] = $maintenanceRunId;
     $payload['started_at'] = $startedAt;
     $payload['finished_at'] = gmdate('c');
     $payload['auth_scheme'] = 'maintenance_hmac_sha256_v2';
-    $payload['maintenance_version'] = '2.2.0';
+    $payload['maintenance_version'] = '2.3.0';
     $payload['diagnostics_schema'] = 'maintenance_observability_v1';
     $payload['database_fingerprint'] = function_exists('automationDatabaseFingerprint')
         ? automationDatabaseFingerprint()

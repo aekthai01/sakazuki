@@ -1309,12 +1309,13 @@ function automationJobDefinitions(): array
         ],
         'product_image_optimizer' => [
             'critical' => false,
-            // Convert only a few legacy images per run so shared hosting never
-            // gets a CPU/memory spike from rebuilding the entire catalogue.
-            'interval' => 60,
+            // Decode at most one legacy image per run. The optimizer performs a
+            // conservative memory preflight before file_get_contents()/GD so a
+            // large source image cannot take down the whole maintenance request.
+            'interval' => 300,
             'callback' => static function (): array {
                 return function_exists('sakazukiOptimizeLegacyProductImages')
-                    ? sakazukiOptimizeLegacyProductImages(3)
+                    ? sakazukiOptimizeLegacyProductImages(1)
                     : ['success' => true, 'skipped' => true, 'message' => 'Image optimizer is unavailable'];
             },
         ],

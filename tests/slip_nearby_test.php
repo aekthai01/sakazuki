@@ -27,6 +27,9 @@ function n_http(array $json, int $http = 200, int $durationMs = 25): array
     ];
 }
 
+n_assert(nearbySlipValidateToken('Bearer header.payload.signature') === 'header.payload.signature', 'Bearer prefix should be accepted and stripped');
+n_assert(nearbySlipValidateToken("token\nheader") === '', 'token control characters must be rejected');
+
 $fixture = [
     'status' => 'success',
     'data' => [

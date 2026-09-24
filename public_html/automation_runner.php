@@ -375,7 +375,13 @@ if ($schemaReady) automationRecordCronHeartbeat($runner);
 
 $definitions = automationJobDefinitions();
 $criticalJobs = ['pending_orders','slip_reconciliation','cgo_inventory','supplier_catalog'];
-$maintenanceJobs = ['cgo_catalog','shared_history','shared_binance_history','commerce_center','history_cleanup','product_image_cleanup','product_image_optimizer'];
+$maintenanceJobs = ['cgo_catalog','shared_history','shared_binance_history','commerce_center','history_cleanup','product_image_cleanup'];
+// Legacy GD optimization is intentionally CLI-only. HTTP maintenance already
+// carries catalogue/history/diagnostic work in the same PHP process, so image
+// decoding here can exhaust shared-hosting memory even after a conservative
+// preflight. New uploads are optimized on write; the background HTTP runner
+// still performs reference-aware orphan cleanup without decoding image pixels.
+if ($isCli && $mode === 'maintenance') $maintenanceJobs[] = 'product_image_optimizer';
 $allowedJobs = $mode === 'critical' ? $criticalJobs : $maintenanceJobs;
 $budgetSeconds = $isCli ? 0 : ($mode === 'critical' ? 21 : 22);
 $results = [];

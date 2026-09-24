@@ -22,7 +22,7 @@ jobs:
         uses: shivammathur/setup-php@v2
         with:
           php-version: '8.2'
-          extensions: curl, json, mbstring
+          extensions: curl, json, mbstring, mysqli, fileinfo
           coverage: none
 
       - name: Lint SlipVerify probe files
@@ -30,6 +30,7 @@ jobs:
         run: |
           set -euo pipefail
           php -l public_html/includes/slip_nearby.php
+          php -l public_html/admin/slipverify.php
           php -l tests/slip_nearby_test.php
 
       - name: Run SlipVerify contract tests

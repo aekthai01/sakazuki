@@ -1,0 +1,186 @@
+name: SlipVerify Production Deploy
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "public_html/includes/slip_nearby.php"
+      - "public_html/admin/slipverify.php"
+      - "tests/slip_nearby_test.php"
+      - ".github/workflows/slipverify-production-deploy.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-ftp-slipverify
+  cancel-in-progress: false
+
+jobs:
+  verify-backup-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      FTP_HOST: svth01.inwcloud.shop
+      FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
+      FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+      FTP_REMOTE_DIR: public_html
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: curl, json, mbstring, mysqli, fileinfo
+          coverage: none
+
+      - name: Validate deploy inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in FTP_HOST FTP_USERNAME FTP_PASSWORD FTP_REMOTE_DIR; do
+            if [ -z "${!name:-}" ]; then
+              echo "Missing required FTP setting: $name"
+              exit 1
+            fi
+          done
+          test -f public_html/includes/slip_nearby.php
+          test -f public_html/admin/slipverify.php
+          test -f tests/slip_nearby_test.php
+
+      - name: Verify SlipVerify files
+        shell: bash
+        run: |
+          set -euo pipefail
+          php -l public_html/includes/slip_nearby.php
+          php -l public_html/admin/slipverify.php
+          php -l tests/slip_nearby_test.php
+          php tests/slip_nearby_test.php
+
+      - name: Resolve previous production source
+        id: base
+        shell: bash
+        env:
+          EVENT_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          before="${EVENT_BEFORE:-}"
+          if [ -n "$before" ] && [ "$before" != "0000000000000000000000000000000000000000" ] && git cat-file -e "$before^{commit}" 2>/dev/null; then
+            base="$before"
+          else
+            base="$(git rev-parse HEAD^)"
+          fi
+          echo "sha=$base" >> "$GITHUB_OUTPUT"
+          echo "Previous source commit: $base"
+
+      - name: Backup production and enforce source-of-truth preflight
+        shell: bash
+        env:
+          BASE_SHA: ${{ steps.base.outputs.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p backup/admin backup/includes previous/admin previous/includes deploy-result
+          remote_dir="${FTP_REMOTE_DIR#/}"; remote_dir="${remote_dir%/}"
+          base_url="ftp://${FTP_HOST}/${remote_dir}"
+
+          for path in admin/slipverify.php includes/slip_nearby.php; do
+            remote_exists=0
+            if curl --silent --show-error --fail --connect-timeout 15 --max-time 90 \
+              --user "$FTP_USERNAME:$FTP_PASSWORD" \
+              "${base_url}/${path}" --output "backup/${path}"; then
+              remote_exists=1
+            else
+              rm -f "backup/${path}"
+            fi
+
+            previous_exists=0
+            if git cat-file -e "${BASE_SHA}:public_html/${path}" 2>/dev/null; then
+              previous_exists=1
+              git show "${BASE_SHA}:public_html/${path}" > "previous/${path}"
+            fi
+
+            if [ "$previous_exists" -eq 1 ]; then
+              if [ "$remote_exists" -ne 1 ]; then
+                echo "Production file unexpectedly missing: $path"
+                exit 1
+              fi
+              if cmp -s "backup/${path}" "previous/${path}"; then
+                echo "Production matches previous main: $path"
+              elif cmp -s "backup/${path}" "public_html/${path}"; then
+                echo "Production already matches current deploy source: $path"
+              else
+                echo "Production drift detected: $path"
+                echo "Refusing to overwrite a host file that differs from both previous and current Git source."
+                exit 1
+              fi
+            elif [ "$remote_exists" -eq 1 ]; then
+              if cmp -s "backup/${path}" "public_html/${path}"; then
+                echo "New Git file already exists on production with identical bytes: $path"
+              else
+                echo "Unexpected pre-existing production file conflicts with new Git file: $path"
+                exit 1
+              fi
+            else
+              echo "New production file will be created: $path"
+            fi
+          done
+
+          : > backup/sha256sums.txt
+          for path in backup/admin/slipverify.php backup/includes/slip_nearby.php; do
+            if [ -f "$path" ]; then sha256sum "$path" >> backup/sha256sums.txt; fi
+          done
+          printf 'Previous Git source: %s\nDeploy commit: %s\n' "$BASE_SHA" "$GITHUB_SHA" > backup/manifest.txt
+
+      - name: Upload pre-deploy backup evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: slipverify-predeploy-${{ github.run_id }}
+          path: backup/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Deploy SlipVerify adapter and admin settings
+        shell: bash
+        run: |
+          set -euo pipefail
+          remote_dir="${FTP_REMOTE_DIR#/}"; remote_dir="${remote_dir%/}"
+          base_url="ftp://${FTP_HOST}/${remote_dir}"
+          for path in includes/slip_nearby.php admin/slipverify.php; do
+            curl --silent --show-error --fail --connect-timeout 15 --max-time 90 \
+              --user "$FTP_USERNAME:$FTP_PASSWORD" --ftp-create-dirs \
+              --upload-file "public_html/${path}" "${base_url}/${path}"
+          done
+
+      - name: Verify production byte-for-byte
+        shell: bash
+        run: |
+          set -euo pipefail
+          remote_dir="${FTP_REMOTE_DIR#/}"; remote_dir="${remote_dir%/}"
+          base_url="ftp://${FTP_HOST}/${remote_dir}"
+          mkdir -p deployed/admin deployed/includes
+          for path in admin/slipverify.php includes/slip_nearby.php; do
+            curl --silent --show-error --fail --connect-timeout 15 --max-time 90 \
+              --user "$FTP_USERNAME:$FTP_PASSWORD" \
+              "${base_url}/${path}" --output "deployed/${path}"
+            cmp "public_html/${path}" "deployed/${path}"
+          done
+          sha256sum deployed/admin/slipverify.php deployed/includes/slip_nearby.php > deploy-result/production-sha256sums.txt
+          printf 'Commit: %s\nVerified byte-for-byte: yes\nFiles: admin/slipverify.php, includes/slip_nearby.php\n' "$GITHUB_SHA" > deploy-result/summary.txt
+
+      - name: Upload deploy evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: slipverify-production-${{ github.run_id }}
+          path: |
+            backup/
+            deploy-result/
+          if-no-files-found: warn
+          retention-days: 14

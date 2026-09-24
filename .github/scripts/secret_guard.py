@@ -21,6 +21,13 @@ PATTERNS: dict[str, re.Pattern[bytes]] = {
     "credential-bearing URL": re.compile(rb"(?:mysql|mariadb|postgres(?:ql)?|ftp|sftp)://[^\s/:@]+:[^\s/@]+@", re.I),
 }
 
+# Exact synthetic fixtures used to verify validation/auth behavior. Keep this
+# allowlist path+value specific so a different nb_live_ value in the same test
+# file still fails CI.
+ALLOWED_TEST_FIXTURES: dict[str, set[bytes]] = {
+    "tests/slip_nearby_test.php": {b"nb_live_1234567890abcdef"},
+}
+
 
 def tracked_and_untracked_files() -> list[Path]:
     raw = subprocess.check_output(
@@ -58,10 +65,15 @@ def main() -> int:
             continue
         if b"\0" in data[:4096]:
             continue
+        path_string = str(path)
         for label, pattern in PATTERNS.items():
             match = pattern.search(data)
-            if match:
-                findings.append((str(path), line_number(data, match.start()), label))
+            if not match:
+                continue
+            matched_value = match.group(0)
+            if matched_value in ALLOWED_TEST_FIXTURES.get(path_string, set()):
+                continue
+            findings.append((path_string, line_number(data, match.start()), label))
 
     db_example = Path("private/database.php.example")
     if not db_example.is_file():

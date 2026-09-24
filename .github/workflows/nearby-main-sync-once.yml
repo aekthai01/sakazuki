@@ -6,6 +6,8 @@ on:
       - feat/nearby-main-integration-public-20260925
     paths:
       - .github/workflows/nearby-main-sync-once.yml
+      - .github/scripts/sync_nearby_main.py
+      - .github/scripts/prepatch_nearby_heading.py
 
 permissions:
   contents: write

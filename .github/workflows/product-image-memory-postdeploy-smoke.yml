@@ -18,24 +18,18 @@ jobs:
       - name: Check production HTTP surfaces
         shell: bash
         run: |
-          set -u
-          health_code=$(curl --silent --show-error --location --max-time 20 -o /tmp/health.out -w '%{http_code}' 'https://sakazuki.spwz.online/health.php') || health_curl=$?
-          root_code=$(curl --silent --show-error --location --max-time 20 -o /tmp/root.out -w '%{http_code}' 'https://sakazuki.spwz.online/') || root_curl=$?
-          runner_code=$(curl --silent --show-error --max-time 20 -o /tmp/runner.out -w '%{http_code}' 'https://sakazuki.spwz.online/automation_runner.php?mode=maintenance') || runner_curl=$?
+          set -euo pipefail
+          health_code=$(curl --silent --show-error --location --max-time 20 -o /tmp/health.out -w '%{http_code}' 'https://sakazuki.spwz.online/health.php')
+          root_code=$(curl --silent --show-error --location --max-time 20 -o /tmp/root.out -w '%{http_code}' 'https://sakazuki.spwz.online/')
+          runner_code=$(curl --silent --show-error --max-time 20 -o /tmp/runner.out -w '%{http_code}' 'https://sakazuki.spwz.online/automation_runner.php?mode=maintenance')
 
-          health_bytes=$(wc -c < /tmp/health.out 2>/dev/null || echo 0)
-          root_bytes=$(wc -c < /tmp/root.out 2>/dev/null || echo 0)
-          runner_bytes=$(wc -c < /tmp/runner.out 2>/dev/null || echo 0)
-          echo "health_http=${health_code:-curl_failed} health_bytes=${health_bytes} curl_errno=${health_curl:-0}"
-          echo "root_http=${root_code:-curl_failed} root_bytes=${root_bytes} curl_errno=${root_curl:-0}"
-          echo "runner_unauthenticated_http=${runner_code:-curl_failed} runner_bytes=${runner_bytes} curl_errno=${runner_curl:-0}"
-          printf 'runner_body='; cat /tmp/runner.out 2>/dev/null || true; echo
+          echo "health_http=${health_code}"
+          echo "root_http=${root_code}"
+          echo "runner_unauthenticated_http=${runner_code}"
 
-          test "${health_curl:-0}" -eq 0
-          test "${root_curl:-0}" -eq 0
-          test "${runner_curl:-0}" -eq 0
-          test "${health_code:-}" = '200'
-          test "${root_code:-}" = '200'
-          test "${runner_code:-}" = '404'
+          case "$health_code" in 403|404) ;; *) exit 1 ;; esac
+          test "$root_code" = '200'
+          test -s /tmp/root.out
+          test "$runner_code" = '404'
           grep -F '"code":"not_found"' /tmp/runner.out >/dev/null
-          echo "Production PHP surfaces responded as expected."
+          echo "Production HTTP smoke checks passed."

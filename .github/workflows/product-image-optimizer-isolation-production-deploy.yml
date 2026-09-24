@@ -1,0 +1,142 @@
+name: Product Image Optimizer Isolation Production Deploy
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/product-image-optimizer-isolation-production-deploy.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify-backup-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      FTP_HOST: svth01.inwcloud.shop
+      FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
+      FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+      FTP_REMOTE_DIR: public_html
+      PRE_DEPLOY_MAIN: 6ced80c4e094fb28039fb4c6810e17b146ffa8df
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: curl, json, mbstring, mysqli, gd
+          coverage: none
+
+      - name: Validate patch shape
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in FTP_HOST FTP_USERNAME FTP_PASSWORD FTP_REMOTE_DIR; do test -n "${!name:-}"; done
+          python3 - <<'PY'
+          from pathlib import Path
+          runner = Path('public_html/automation_runner.php').read_text()
+          test = Path('tests/product_image_lifecycle_test.php').read_text()
+          assert "$maintenanceJobs = ['cgo_catalog','shared_history','shared_binance_history','commerce_center','history_cleanup','product_image_cleanup'];" in runner
+          assert "if ($isCli && $mode === 'maintenance') $maintenanceJobs[] = 'product_image_optimizer';" in runner
+          assert "$maintenanceJobs = ['cgo_catalog','shared_history','shared_binance_history','commerce_center','history_cleanup','product_image_cleanup','product_image_optimizer'];" not in runner
+          assert 'sakazuki_direct_partial_jobs' in runner
+          assert 'legacy product image optimizer must be isolated to CLI maintenance' in test
+          print('optimizer isolation production shape verified')
+          PY
+
+      - name: Run complete PHP verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check "$PRE_DEPLOY_MAIN"..HEAD -- . ':!.github/workflows/product-image-optimizer-isolation-production-deploy.yml'
+          php tests/product_image_lifecycle_test.php
+          failures=0
+          count=0
+          while IFS= read -r -d '' file; do
+            count=$((count + 1))
+            if ! php -l "$file" >/tmp/php-lint.out 2>&1; then
+              cat /tmp/php-lint.out
+              failures=$((failures + 1))
+            fi
+          done < <(find public_html -type f -name '*.php' -print0)
+          echo "PHP files checked: $count"
+          test "$failures" -eq 0
+          for test_file in tests/*.php; do php "$test_file"; done
+
+      - name: Backup production and enforce no-drift preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p backup deploy-result
+          base_url="ftp://${FTP_HOST}/${FTP_REMOTE_DIR}"
+          curl --silent --show-error --fail --connect-timeout 15 --max-time 90 \
+            --user "$FTP_USERNAME:$FTP_PASSWORD" \
+            "${base_url}/automation_runner.php" --output backup/automation_runner.php
+          git show "${PRE_DEPLOY_MAIN}:public_html/automation_runner.php" > /tmp/pre-deploy-runner.php
+          if ! cmp -s backup/automation_runner.php /tmp/pre-deploy-runner.php; then
+            echo 'Production drift detected before deploy: automation_runner.php'
+            exit 1
+          fi
+          sha256sum backup/automation_runner.php > backup/sha256sums.txt
+          printf 'Pre-deploy Git base: %s\nDeploy commit: %s\n' "$PRE_DEPLOY_MAIN" "$GITHUB_SHA" > backup/manifest.txt
+
+      - name: Upload pre-deploy backup
+        uses: actions/upload-artifact@v4
+        with:
+          name: product-image-optimizer-isolation-predeploy-${{ github.run_id }}
+          path: backup/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Deploy automation runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_url="ftp://${FTP_HOST}/${FTP_REMOTE_DIR}"
+          curl --silent --show-error --fail --connect-timeout 15 --max-time 90 \
+            --user "$FTP_USERNAME:$FTP_PASSWORD" \
+            --upload-file public_html/automation_runner.php \
+            "${base_url}/automation_runner.php"
+
+      - name: Verify production byte-for-byte
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_url="ftp://${FTP_HOST}/${FTP_REMOTE_DIR}"
+          curl --silent --show-error --fail --connect-timeout 15 --max-time 90 \
+            --user "$FTP_USERNAME:$FTP_PASSWORD" \
+            "${base_url}/automation_runner.php" --output /tmp/deployed-runner.php
+          cmp public_html/automation_runner.php /tmp/deployed-runner.php
+          sha256sum /tmp/deployed-runner.php > deploy-result/production-sha256sums.txt
+          printf 'Commit: %s\nVerified byte-for-byte: yes\n' "$GITHUB_SHA" > deploy-result/summary.txt
+
+      - name: Smoke production HTTP surfaces
+        shell: bash
+        run: |
+          set -euo pipefail
+          health_code=$(curl --silent --show-error --location --max-time 20 -o /tmp/health.out -w '%{http_code}' 'https://sakazuki.spwz.online/health.php')
+          test "$health_code" = '200'
+          root_code=$(curl --silent --show-error --location --max-time 20 -o /tmp/root.out -w '%{http_code}' 'https://sakazuki.spwz.online/')
+          test "$root_code" = '200'
+          runner_code=$(curl --silent --show-error --max-time 20 -o /tmp/runner.out -w '%{http_code}' 'https://sakazuki.spwz.online/automation_runner.php?mode=maintenance')
+          test "$runner_code" = '404'
+          grep -F '"code":"not_found"' /tmp/runner.out >/dev/null
+          printf 'health_http=%s\nroot_http=%s\nrunner_unauth_http=%s\n' "$health_code" "$root_code" "$runner_code" > deploy-result/http-smoke.txt
+
+      - name: Upload deploy evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: product-image-optimizer-isolation-production-${{ github.run_id }}
+          path: |
+            backup/
+            deploy-result/
+          if-no-files-found: warn
+          retention-days: 14

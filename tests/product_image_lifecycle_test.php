@@ -74,9 +74,9 @@ image_lifecycle_assert(empty($outsideResult['deleted']), 'unmanaged traversal pa
 image_lifecycle_assert(is_file($outside), 'outside file must remain intact');
 
 $automationRunner = file_get_contents(__DIR__ . '/../public_html/automation_runner.php');
+$maintenanceJobsNeedle = '$maintenanceJobs = [\'cgo_catalog\',\'shared_history\',\'shared_binance_history\',\'commerce_center\',\'history_cleanup\',\'product_image_cleanup\',\'product_image_optimizer\'];';
 image_lifecycle_assert(
-    is_string($automationRunner)
-        && strpos($automationRunner, "$maintenanceJobs = ['cgo_catalog','shared_history','shared_binance_history','commerce_center','history_cleanup','product_image_cleanup','product_image_optimizer'];") !== false,
+    is_string($automationRunner) && strpos($automationRunner, $maintenanceJobsNeedle) !== false,
     'maintenance runner must schedule product image cleanup and optimizer jobs'
 );
 image_lifecycle_assert(

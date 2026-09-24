@@ -1,0 +1,172 @@
+name: Production FTP Deploy
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .github/workflows/production-ftp-deploy.yml
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type DEPLOY to upload public_html from main to production'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-ftp-deploy
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: curl, json, mbstring, mysqli, fileinfo
+          coverage: none
+
+      - name: Guard committed secrets
+        run: python3 .github/scripts/secret_guard.py
+
+      - name: Lint production PHP
+        shell: bash
+        run: |
+          set -euo pipefail
+          failures=0
+          count=0
+          while IFS= read -r -d '' file; do
+            count=$((count + 1))
+            if ! php -l "$file" >/tmp/php-lint.out 2>&1; then
+              cat /tmp/php-lint.out
+              failures=$((failures + 1))
+            fi
+          done < <(find public_html -type f -name '*.php' -print0)
+          echo "PHP files checked: $count"
+          if [ "$failures" -ne 0 ]; then
+            echo "PHP syntax failures: $failures"
+            exit 1
+          fi
+
+      - name: Verify deploy scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d public_html
+          test ! -e public_html/private
+          count="$(git ls-files 'public_html/**' | wc -l | tr -d ' ')"
+          if [ "$count" -lt 1 ]; then
+            echo "No tracked public_html files found."
+            exit 1
+          fi
+          echo "Tracked public_html files eligible for deploy: $count"
+          echo "private/, tests/, .git/, archives, local .env files and runtime secrets are outside deploy scope."
+
+  deploy:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.confirm == 'DEPLOY' }}
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    env:
+      FTP_HOST: ${{ secrets.FTP_HOST }}
+      FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
+      FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+      FTP_REMOTE_DIR: ${{ secrets.FTP_REMOTE_DIR }}
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - name: Validate FTP secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in FTP_HOST FTP_USERNAME FTP_PASSWORD FTP_REMOTE_DIR; do
+            if [ -z "${!name:-}" ]; then
+              echo "Missing required GitHub Actions secret: $name"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+          echo "Required FTP secrets are configured. Values are not printed."
+
+      - name: Resolve remote directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          host="${FTP_HOST#ftp://}"
+          host="${host#ftps://}"
+          host="${host%/}"
+          remote="${FTP_REMOTE_DIR#/}"
+          remote="${remote%/}"
+
+          if curl --silent --show-error --fail --connect-timeout 15 --max-time 45 \
+            --user "$FTP_USERNAME:$FTP_PASSWORD" --list-only \
+            "ftp://$host/$remote/" >/dev/null; then
+            echo "FTP_BASE_URL=ftp://$host/$remote" >> "$GITHUB_ENV"
+            echo "Remote directory resolved as login-relative path."
+            exit 0
+          fi
+
+          if curl --silent --show-error --fail --connect-timeout 15 --max-time 45 \
+            --user "$FTP_USERNAME:$FTP_PASSWORD" --list-only \
+            "ftp://$host//$remote/" >/dev/null; then
+            echo "FTP_BASE_URL=ftp://$host//$remote" >> "$GITHUB_ENV"
+            echo "Remote directory resolved as absolute FTP path."
+            exit 0
+          fi
+
+          echo "FTP authentication or FTP_REMOTE_DIR validation failed."
+          exit 2
+
+      - name: Upload tracked public_html files
+        shell: bash
+        run: |
+          set -euo pipefail
+          uploaded=0
+          failed=0
+
+          while IFS= read -r -d '' file; do
+            rel="${file#public_html/}"
+            target="${FTP_BASE_URL}/${rel}"
+            if curl --silent --show-error --fail \
+              --retry 3 --retry-delay 2 --retry-all-errors \
+              --connect-timeout 15 --max-time 120 \
+              --ftp-create-dirs \
+              --user "$FTP_USERNAME:$FTP_PASSWORD" \
+              --upload-file "$file" \
+              "$target" >/dev/null; then
+              uploaded=$((uploaded + 1))
+            else
+              echo "Upload failed: $rel"
+              failed=$((failed + 1))
+            fi
+          done < <(git ls-files -z 'public_html/**')
+
+          echo "Uploaded files: $uploaded"
+          if [ "$failed" -ne 0 ]; then
+            echo "Failed uploads: $failed"
+            exit 1
+          fi
+
+      - name: Deployment summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Production FTP upload completed from main commit ${GITHUB_SHA}."
+          echo "This workflow never deletes remote files and never uploads private/ or repository secrets."

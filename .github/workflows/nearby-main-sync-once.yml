@@ -8,6 +8,7 @@ on:
       - .github/workflows/nearby-main-sync-once.yml
       - .github/scripts/sync_nearby_main.py
       - .github/scripts/prepatch_nearby_heading.py
+      - .github/scripts/secret_guard.py
 
 permissions:
   contents: write

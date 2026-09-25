@@ -1,0 +1,8 @@
+Store V2 production deployment approved by the user on 2026-09-25.
+
+Exact approved scope:
+- public_html/assets/js/nav.js
+- public_html/assets/js/store-v2.js
+- public_html/assets/css/store-v2.css
+
+Do not deploy PHP, database, API, auth, payment, stock, order, ledger, uploads, or any other files under this approval.

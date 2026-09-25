@@ -300,25 +300,30 @@ body.sk-role-admin table td {
     box-shadow: inset 0 0 0 1px rgba(var(--sk-primary-rgb), 0.20);
 }
 
-/* Dashboard */
-body.sk-page-dashboard .purchase-activity-card {
+/* Customer dashboards */
+body.sk-role-user.sk-page-dashboard .purchase-activity-card,
+body.sk-role-reseller.sk-page-dashboard .purchase-activity-card {
     margin-bottom: 0;
 }
 
-body.sk-page-dashboard main > .grid > .glass:first-child {
+body.sk-role-user.sk-page-dashboard main > .grid > .glass:first-child,
+body.sk-role-reseller.sk-page-dashboard main > .grid > .glass:first-child {
     border-color: rgba(var(--sk-primary-rgb), 0.30) !important;
     background:
         linear-gradient(145deg, rgba(var(--sk-primary-rgb), 0.18), rgba(17, 24, 39, 0.92)) !important;
 }
 
-body.sk-page-dashboard main > .grid > .glass:first-child p[class*="text-2xl"],
-body.sk-page-dashboard main > .grid > .glass:first-child p[class*="text-3xl"] {
+body.sk-role-user.sk-page-dashboard main > .grid > .glass:first-child p[class*="text-2xl"],
+body.sk-role-user.sk-page-dashboard main > .grid > .glass:first-child p[class*="text-3xl"],
+body.sk-role-reseller.sk-page-dashboard main > .grid > .glass:first-child p[class*="text-2xl"],
+body.sk-role-reseller.sk-page-dashboard main > .grid > .glass:first-child p[class*="text-3xl"] {
     color: #fff !important;
     font-weight: 750;
     letter-spacing: -0.02em;
 }
 
-body.sk-page-dashboard .catalog-auto-grid {
+body.sk-role-user.sk-page-dashboard .catalog-auto-grid,
+body.sk-role-reseller.sk-page-dashboard .catalog-auto-grid {
     grid-template-columns: repeat(auto-fit, minmax(142px, 1fr));
 }
 
@@ -493,30 +498,41 @@ body.sk-page-buy nav[aria-label="Store pages"] a {
     }
 }
 
-/* History, keys, rankings and account pages */
-body.sk-page-history main,
-body.sk-page-mykeys main,
-body.sk-page-rankings main,
-body.sk-page-account main,
-body.sk-page-key_resets main,
-body.sk-page-reseller_program main,
-body.sk-page-redeem_angpao main,
-body.sk-page-api_store main {
+/* Customer history, keys, rankings and account pages */
+body.sk-role-user.sk-page-history main,
+body.sk-role-user.sk-page-mykeys main,
+body.sk-role-user.sk-page-rankings main,
+body.sk-role-user.sk-page-account main,
+body.sk-role-user.sk-page-key_resets main,
+body.sk-role-user.sk-page-reseller_program main,
+body.sk-role-user.sk-page-redeem_angpao main,
+body.sk-role-user.sk-page-api_store main,
+body.sk-role-reseller.sk-page-history main,
+body.sk-role-reseller.sk-page-mykeys main,
+body.sk-role-reseller.sk-page-rankings main,
+body.sk-role-reseller.sk-page-account main,
+body.sk-role-reseller.sk-page-key_resets main,
+body.sk-role-reseller.sk-page-api_store main {
     width: min(100%, 900px) !important;
     max-width: 900px !important;
 }
 
-body.sk-page-history [class*="text-[10px]"],
-body.sk-page-mykeys [class*="text-[10px]"] {
+body.sk-role-user.sk-page-history [class*="text-[10px]"],
+body.sk-role-user.sk-page-mykeys [class*="text-[10px]"],
+body.sk-role-reseller.sk-page-history [class*="text-[10px]"],
+body.sk-role-reseller.sk-page-mykeys [class*="text-[10px]"] {
     font-size: 11px !important;
 }
 
-body.sk-page-history [class*="text-[11px]"],
-body.sk-page-mykeys [class*="text-[11px]"] {
+body.sk-role-user.sk-page-history [class*="text-[11px]"],
+body.sk-role-user.sk-page-mykeys [class*="text-[11px]"],
+body.sk-role-reseller.sk-page-history [class*="text-[11px]"],
+body.sk-role-reseller.sk-page-mykeys [class*="text-[11px]"] {
     font-size: 12px !important;
 }
 
-body.sk-page-history [class*="max-h-"] {
+body.sk-role-user.sk-page-history [class*="max-h-"],
+body.sk-role-reseller.sk-page-history [class*="max-h-"] {
     scrollbar-width: thin;
 }
 
@@ -595,52 +611,65 @@ body.sk-role-admin .modal {
         width: min(20rem, 90vw) !important;
     }
 
-    body.sk-app-shell .purchase-activity-account {
+    body.sk-role-user .purchase-activity-account,
+    body.sk-role-reseller .purchase-activity-account {
         max-width: 45% !important;
     }
 
-    body.sk-page-dashboard main > .grid {
+    body.sk-role-user.sk-page-dashboard main > .grid,
+    body.sk-role-reseller.sk-page-dashboard main > .grid {
         grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
         gap: 10px !important;
     }
 
-    body.sk-page-dashboard main > .grid > .glass:first-child {
+    body.sk-role-user.sk-page-dashboard main > .grid > .glass:first-child,
+    body.sk-role-reseller.sk-page-dashboard main > .grid > .glass:first-child {
         grid-column: 1 / -1;
         padding: 18px !important;
     }
 
-    body.sk-page-dashboard main > .grid > .glass:not(:first-child) {
+    body.sk-role-user.sk-page-dashboard main > .grid > .glass:not(:first-child),
+    body.sk-role-reseller.sk-page-dashboard main > .grid > .glass:not(:first-child) {
         padding: 13px !important;
     }
 
-    body.sk-page-dashboard main > .grid > .glass:not(:first-child) i[class*="text-3xl"],
-    body.sk-page-dashboard main > .grid > .glass:not(:first-child) i[style*="3rem"] {
+    body.sk-role-user.sk-page-dashboard main > .grid > .glass:not(:first-child) i[class*="text-3xl"],
+    body.sk-role-user.sk-page-dashboard main > .grid > .glass:not(:first-child) i[style*="3rem"],
+    body.sk-role-reseller.sk-page-dashboard main > .grid > .glass:not(:first-child) i[class*="text-3xl"],
+    body.sk-role-reseller.sk-page-dashboard main > .grid > .glass:not(:first-child) i[style*="3rem"] {
         font-size: 1.55rem !important;
     }
 
-    body.sk-page-dashboard main > .grid > .glass:not(:first-child) p[class*="text-3xl"],
-    body.sk-page-dashboard main > .grid > .glass:not(:first-child) p[class*="text-2xl"],
-    body.sk-page-dashboard main > .grid > .glass:not(:first-child) h4[class*="text-2xl"] {
+    body.sk-role-user.sk-page-dashboard main > .grid > .glass:not(:first-child) p[class*="text-3xl"],
+    body.sk-role-user.sk-page-dashboard main > .grid > .glass:not(:first-child) p[class*="text-2xl"],
+    body.sk-role-user.sk-page-dashboard main > .grid > .glass:not(:first-child) h4[class*="text-2xl"],
+    body.sk-role-reseller.sk-page-dashboard main > .grid > .glass:not(:first-child) p[class*="text-3xl"],
+    body.sk-role-reseller.sk-page-dashboard main > .grid > .glass:not(:first-child) p[class*="text-2xl"],
+    body.sk-role-reseller.sk-page-dashboard main > .grid > .glass:not(:first-child) h4[class*="text-2xl"] {
         font-size: 1.25rem !important;
     }
 
-    body.sk-page-dashboard main > .grid > .glass:not(:first-child) a {
+    body.sk-role-user.sk-page-dashboard main > .grid > .glass:not(:first-child) a,
+    body.sk-role-reseller.sk-page-dashboard main > .grid > .glass:not(:first-child) a {
         min-height: 40px;
         padding: 8px 10px !important;
         font-size: 11px !important;
     }
 
-    body.sk-page-dashboard .catalog-auto-grid {
+    body.sk-role-user.sk-page-dashboard .catalog-auto-grid,
+    body.sk-role-reseller.sk-page-dashboard .catalog-auto-grid {
         grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
         gap: 9px !important;
     }
 
-    body.sk-page-dashboard .catalog-card {
+    body.sk-role-user.sk-page-dashboard .catalog-card,
+    body.sk-role-reseller.sk-page-dashboard .catalog-card {
         padding: 11px !important;
         gap: 8px !important;
     }
 
-    body.sk-page-dashboard .catalog-card > span:first-child {
+    body.sk-role-user.sk-page-dashboard .catalog-card > span:first-child,
+    body.sk-role-reseller.sk-page-dashboard .catalog-card > span:first-child {
         width: 34px !important;
         height: 34px !important;
     }
@@ -726,7 +755,8 @@ body.sk-role-admin .modal {
 }
 
 @media (max-width: 390px) {
-    body.sk-page-dashboard .catalog-auto-grid {
+    body.sk-role-user.sk-page-dashboard .catalog-auto-grid,
+    body.sk-role-reseller.sk-page-dashboard .catalog-auto-grid {
         grid-template-columns: 1fr !important;
     }
 

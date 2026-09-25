@@ -94,7 +94,7 @@ jobs:
         run: |
           set -euo pipefail
           missing=0
-          for name in FTP_HOST FTP_USERNAME FTP_PASSWORD FTP_REMOTE_DIR; do
+          for name in FTP_HOST FTP_USERNAME FTP_PASSWORD; do
             if [ -z "${!name:-}" ]; then
               echo "Missing required GitHub Actions secret: $name"
               missing=1
@@ -105,7 +105,7 @@ jobs:
           fi
           echo "Required FTP secrets are configured. Values are not printed."
 
-      - name: Resolve remote directory
+      - name: Resolve production directory safely
         shell: bash
         run: |
           set -euo pipefail
@@ -114,24 +114,34 @@ jobs:
           host="${host%/}"
           remote="${FTP_REMOTE_DIR#/}"
           remote="${remote%/}"
+          sentinel="app.php"
 
-          if curl --silent --show-error --fail --connect-timeout 15 --max-time 45 \
-            --user "$FTP_USERNAME:$FTP_PASSWORD" --list-only \
-            "ftp://$host/$remote/" >/dev/null; then
-            echo "FTP_BASE_URL=ftp://$host/$remote" >> "$GITHUB_ENV"
-            echo "Remote directory resolved as login-relative path."
-            exit 0
-          fi
+          test_candidate() {
+            label="$1"
+            base="$2"
+            tmp="$(mktemp)"
+            if curl --silent --show-error --fail --globoff \
+              --connect-timeout 15 --max-time 45 \
+              --user "$FTP_USERNAME:$FTP_PASSWORD" \
+              --output "$tmp" "${base}/${sentinel}" 2>/dev/null; then
+              if cmp -s "public_html/${sentinel}" "$tmp"; then
+                rm -f "$tmp"
+                echo "FTP_BASE_URL=$base" >> "$GITHUB_ENV"
+                echo "Production root resolved: $label (sentinel matches GitHub main)."
+                return 0
+              fi
+              echo "Candidate reachable but sentinel differs: $label"
+            fi
+            rm -f "$tmp"
+            return 1
+          }
 
-          if curl --silent --show-error --fail --connect-timeout 15 --max-time 45 \
-            --user "$FTP_USERNAME:$FTP_PASSWORD" --list-only \
-            "ftp://$host//$remote/" >/dev/null; then
-            echo "FTP_BASE_URL=ftp://$host//$remote" >> "$GITHUB_ENV"
-            echo "Remote directory resolved as absolute FTP path."
-            exit 0
-          fi
+          if [ -n "$remote" ] && test_candidate "configured login-relative path" "ftp://$host/$remote"; then exit 0; fi
+          if [ -n "$remote" ] && test_candidate "configured absolute path" "ftp://$host//$remote"; then exit 0; fi
+          if test_candidate "FTP account root" "ftp://$host"; then exit 0; fi
+          if test_candidate "public_html below FTP account root" "ftp://$host/public_html"; then exit 0; fi
 
-          echo "FTP authentication or FTP_REMOTE_DIR validation failed."
+          echo "Could not identify production public_html safely. Nothing was uploaded."
           exit 2
 
       - name: Upload tracked public_html files
@@ -144,7 +154,7 @@ jobs:
           while IFS= read -r -d '' file; do
             rel="${file#public_html/}"
             target="${FTP_BASE_URL}/${rel}"
-            if curl --silent --show-error --fail \
+            if curl --silent --show-error --fail --globoff \
               --retry 3 --retry-delay 2 --retry-all-errors \
               --connect-timeout 15 --max-time 120 \
               --ftp-create-dirs \

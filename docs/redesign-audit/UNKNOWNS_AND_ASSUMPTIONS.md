@@ -1,0 +1,28 @@
+# Unknowns and assumptions register
+
+**Implementation gate CLOSED.** Source discovery progressed; actual authenticated/mobile runtime proof and baseline screenshots are missing. No Production probing, purchase, wallet mutation or cron invocation was performed.
+
+| ID | Unknown | Risk / effect | Evidence checked | Next action | Status |
+|---|---|---|---|---|---|
+| U-001 | Isolated executable baseline | Critical: cannot establish interactions or monetary regression | PHP binary absent on PATH; no configured test DB/private database.php; repo has example credentials and incremental schema files, not a demonstrated initialized test dataset | Provide/prepare isolated PHP+MySQL fixture environment, synthetic roles/settings, disabled external delivery; keep Production credentials out | OPEN / blocks runtime |
+| U-002 | Parent/child scroll + mobile keyboard | High: obscured input/locked UI | app.php overflow/fixed frame; Dashboard main utilities; nav lock; no discovered visualViewport handling | Real shell/direct device traces at widths in test matrix | OPEN |
+| U-003 | Quantity input auto-focus baseline | High: keyboard opens on modal selection | buy.php:1214-1217 explicit focus; reseller independent path | Reproduce Android/iOS, record viewport and focus; separate behavior fix if authorized | OPEN; source conflict confirmed |
+| U-004 | Activity survives bfcache | High for pilot: feed may stop | purchase-activity.js pagehide sets stopped; no pageshow resume; shell/nav restore independently | Trigger persisted pageshow, observe feed requests/rotation after return | OPEN; hypothesis only |
+| U-005 | Verification inside shell | High: navigation lock/nested shell | requireLogin -> accountVerificationRequireComplete; promoteAuthPage excludes verify_account.php | Unverified/expired fixture in iframe and direct; complete OTP with local mail stub | OPEN |
+| U-006 | Parent music overlap / touch access | High: parent overlay can obscure child dialog | music z58 parent; Store modal >10000 child | Expanded/collapsed player during modal, drawer, orientation and keyboard | OPEN |
+| U-007 | Dashboard recent keys expectation | Medium: unrequested feature activation | active dashboard uses unassigned userKeys; dormant fragment endpoint assigns [] | Confirm actual rendered state; record as baseline, separate feature/bug decision | OPEN |
+| U-008 | Production equals GitHub / CDN / server rewrite | High for eventual deploy; not needed to write audit | GitHub tree comparison only; no host manifest | Authorized read-only exact-file comparison before any proposed deploy; no broad FTP | OPEN |
+| U-009 | Settings/schema/roles coverage | High: hidden API/wallet/branding paths | getSetting and conditional menu/render consumers, inherited guards | Synthetic enabled/disabled fixtures; inspect schema readiness and permissions | OPEN |
+| U-010 | Cron installation / external API callers | Critical for Store: stock/refund completion | worker and runner source + heartbeat fallback; no scheduler observation | Inspect non-production scheduler config, provider stubs, pending/refund/conflict fixtures | OPEN |
+| U-011 | Late async responses / concurrent tabs | Critical for Store; later phase | order/inventory guards and locking source | Deterministic delayed supplier responses, back navigation, duplicate submit in isolated environment | OPEN |
+| U-012 | Clipboard/download/CDN failures | High for commerce, medium for Dashboard shell | Lang fallback focus, AppPageLoader exclusions, external icons/Swal/YouTube | Secure-context tests, blocked-CDN cases, download cancel/return; no stuck overlay | OPEN |
+| U-013 | Full admin action ownership | High for later Admin phase | All route candidates regenerated, direct forms/guards/loaders indexed; 10 instant-filter loaders | Trace each branch and panel with role-specific fixture before its phase | OPEN; index is not exhaustive semantic audit |
+| U-014 | External dynamic loaders for dormant assets | High if different from checked source | all tracked source literal-loader and marker search; no current PHP consumers | Runtime network manifest in isolated matching deployment; inspect host injection separately if relevant | OPEN observation; DORMANT source classification |
+| U-015 | Figma destination plan | Low; diagram only | generate_diagram requested team/organization selection | User selects destination in tool widget; do not claim diagram created yet | OPEN |
+| A-001 | main restored pre-redesign application tree | Repository integrity only | GitHub baseline...main compare lists only 2 documentation additions; rollback in ancestry | Recheck head before publishing audit update | RESOLVED at 74bb4fc |
+| A-002 | Dashboard is customer landing | Wrong assumption | app.php defaultRoute and auth redirectByRole | Master Plan corrected; keep Store landing | RESOLVED |
+| A-003 | fast-nav / dashboard-live actively own User main | Wrong assumption | no loader; no current PHP fast-page/dynamic-root; ordinary Dashboard render | Master Plan corrected; do not activate | RESOLVED in source, runtime per U-014 |
+| A-004 | Bare direct role URL is direct-mode test | Wrong assumption | shell-bridge eligible GET redirect and __shell=0 check | Include both direct-entry handoff and direct escape in matrix | RESOLVED source |
+| A-005 | Authenticated GET is harmless production read | Wrong assumption | auth bootstrap schedules cleanup; auth/verification touches session/device state | Keep experiments isolated | RESOLVED source |
+
+Open items are not waived by a mockup, syntax check, static screenshot or approval to continue auditing. Implementation requires relevant High/Critical items resolved plus Phase A pilot acceptance.

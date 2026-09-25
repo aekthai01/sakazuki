@@ -40,6 +40,10 @@ Audit source: `main` at `74bb4fc38236bdd5a3ae90477b3e8df82844e9a6`. GitHub compa
 - `requireLogin()` can require account verification. `app-shell.js::promoteAuthPage` does not list `verify_account.php`; verification behavior inside the iframe is an explicit HIGH-risk UNKNOWN until observed.
 - `auth.php` calls `keyHistoryScheduleAutoCleanup()` at bootstrap. Request-time/background side effects must be traced; authenticated GET is not automatically a side-effect-free Production probe.
 
+- Second-pass source finding: `user/buy.php::selectVariant` already focuses `quantityInput` after opening the modal. Treat the no-forced-keyboard rule as a future acceptance requirement that currently conflicts with source behavior, not as an already satisfied baseline invariant. Reproduce on a real mobile keyboard and handle any behavior change in separate approved scope.
+- Second-pass source finding: active `purchase-activity.js` stops its controller on `pagehide` without a `pageshow` restart. This is a bfcache regression hypothesis to reproduce, not a claimed observed bug or permission to alter shared code.
+- Dashboard's Recent Keys branch uses `empty($userKeys)` but the current include chain has no discovered assignment to that variable. Do not populate it from dormant hydration code as part of styling; baseline state and any intended feature change require separate validation.
+
 ## Evidence and activity classification gate
 
 Maintain two fields: **source classification** and **runtime observation**. ACTIVE means a traced current consumer in the stated source context; CONDITIONAL requires its exact gate; DORMANT means no discovered current loader/consumer; LEGACY requires explicit retirement evidence; UNKNOWN records unresolved reachability/ownership. No source classification alone proves observed execution. All browser/DB/mobile behavior remains UNTESTED until exercised in an isolated non-production environment with matching schema, representative settings and roles. Do not relabel UNTESTED as PASS from syntax, static search, screenshots of a mock, or HTTP 200.

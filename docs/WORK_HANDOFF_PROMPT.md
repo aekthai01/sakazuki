@@ -4,6 +4,10 @@
 
 ---
 
+## Audit correction — 2026-09-25
+
+Read Master Plan section 0.1 and `docs/redesign-audit/README.md` before using the historical prompt below. At source commit `74bb4fc38236bdd5a3ae90477b3e8df82844e9a6`, fast-nav / user-fast-pages / dashboard-live have no discovered loader; they are DORMANT in this snapshot, not presumed active runtime. Dashboard is server-rendered, User/Reseller login lands on Store, and direct-mode tests need `__shell=0`. Runtime/keyboard/bfcache evidence is still UNTESTED. The audit draft is PR #21; do not restart from assumptions or treat the source inventory as completed runtime proof. No UI implementation, merge, Production write or broad FTP deployment is authorized by the audit.
+
 ## PROMPT
 
 คุณกำลังรับช่วง redesign โปรเจกต์ GitHub `aekthai01/sakazuki`

@@ -20,14 +20,16 @@
         return '';
     }
 
-    function resolvePage() {
-        const path = String(window.location.pathname || '');
+    function resolvePage(href) {
+        let path = String(window.location.pathname || '');
+        if (href) {
+            try { path = new URL(href, window.location.href).pathname; } catch (_) {}
+        }
         const piece = path.split('/').filter(Boolean).pop() || 'dashboard.php';
         return piece.replace(/\.php$/i, '').replace(/[^a-z0-9_-]+/gi, '_').toLowerCase() || 'dashboard';
     }
 
     const role = resolveRole();
-    const page = resolvePage();
     const drawerBreakpoint = role === 'admin' ? 1536 : 1200;
 
     function ensureUiStyles() {
@@ -39,8 +41,14 @@
         document.head.appendChild(link);
     }
 
-    function applyPageContext() {
+    function applyPageContext(href) {
         if (!document.body || !role) return;
+        const page = resolvePage(href);
+        Array.from(document.body.classList).forEach(function (className) {
+            if (/^sk-role-/.test(className) || /^sk-page-/.test(className)) {
+                document.body.classList.remove(className);
+            }
+        });
         document.body.classList.add('sk-app-shell', 'sk-role-' + role, 'sk-page-' + page);
         document.body.setAttribute('data-sk-role', role);
         document.body.setAttribute('data-sk-page', page);
@@ -192,8 +200,23 @@
         ];
     }
 
+    function updateMobileNavigation() {
+        const currentPage = resolvePage();
+        const byKey = new Map(mobileNavItems().map(function (item) { return [item.key, item]; }));
+        document.querySelectorAll('[data-sk-mobile-nav]').forEach(function (link) {
+            const item = byKey.get(link.getAttribute('data-sk-mobile-nav') || '');
+            const active = !!(item && item.pages.indexOf(currentPage) !== -1);
+            link.classList.toggle('is-current', active);
+            if (active) link.setAttribute('aria-current', 'page');
+            else link.removeAttribute('aria-current');
+        });
+    }
+
     function buildMobileNavigation() {
-        if (!document.body || document.querySelector('.sk-mobile-nav')) return;
+        if (!document.body || document.querySelector('.sk-mobile-nav')) {
+            updateMobileNavigation();
+            return;
+        }
         const items = mobileNavItems();
         if (!items.length) return;
 
@@ -208,12 +231,6 @@
             link.className = 'sk-mobile-nav__item';
             link.setAttribute('data-sk-mobile-nav', item.key);
 
-            const active = item.pages.indexOf(page) !== -1;
-            if (active) {
-                link.classList.add('is-current');
-                link.setAttribute('aria-current', 'page');
-            }
-
             const icon = document.createElement('i');
             icon.className = 'bi ' + item.icon;
             icon.setAttribute('aria-hidden', 'true');
@@ -227,6 +244,7 @@
         });
 
         document.body.appendChild(nav);
+        updateMobileNavigation();
     }
 
     function improveTouchLabels() {
@@ -242,6 +260,14 @@
             const icon = button.querySelector('.bi-x, .bi-x-lg');
             if (icon && !button.getAttribute('aria-label')) button.setAttribute('aria-label', 'Close navigation menu');
         });
+    }
+
+    function syncUiContext(href) {
+        applyPageContext(href);
+        markCurrentNavigation();
+        buildMobileNavigation();
+        updateMobileNavigation();
+        improveTouchLabels();
     }
 
     window.openDrawer = openDrawer;
@@ -276,6 +302,11 @@
         setDrawerState(false);
     });
 
+    document.addEventListener('fastnav:after', function (event) {
+        const nextUrl = event && event.detail ? event.detail.url : window.location.href;
+        syncUiContext(nextUrl);
+    });
+
     // Do not close menus on every resize. Mobile browsers routinely resize the
     // visual viewport when their address/navigation bars expand or collapse,
     // which previously made a freshly opened menu close itself at random.
@@ -295,11 +326,10 @@
     // when the document itself was restored from the back-forward cache.
     window.addEventListener('pageshow', function (event) {
         if (event.persisted) resetTransientNavState();
-        markCurrentNavigation();
+        syncUiContext();
     });
 
     document.addEventListener('DOMContentLoaded', function () {
-        applyPageContext();
         const drawer = getDrawer();
         const overlay = getOverlay();
         const drawerOpen = !!(drawer && drawer.classList.contains('open'));
@@ -308,8 +338,6 @@
         dropdownMenus().forEach(function (menu) {
             setDropdownState(menu, !menu.classList.contains('hidden'));
         });
-        markCurrentNavigation();
-        improveTouchLabels();
-        buildMobileNavigation();
+        syncUiContext();
     }, { once: true });
 })();

@@ -29,6 +29,29 @@
 
 ---
 
+# 0.1 Source audit correction — 2026-09-25 (takes precedence over historical assumptions)
+
+Audit source: `main` at `74bb4fc38236bdd5a3ae90477b3e8df82844e9a6`. GitHub comparison against `34b9f2f7a5ae2923fe07bc7a931f5589ceec1a65` changes only this plan and the handoff document; rollback is in ancestry. This proves repository state, not Production parity.
+
+- `app.php:11-13` and `includes/auth.php::redirectByRole` select `user/buy.php` / `reseller/buy.php` after login; Dashboard is an engineering pilot only.
+- Current role navs load shell bridge, nav, security and lang. Repository-wide consumer search finds no PHP/HTML/CSS loader for `fast-nav.js`, `user-fast-pages.js`, `dashboard-live.js`, `app.js`, `style.css`, `global-upgrades.css` or `tailwind-addon.css`. Classify these as **DORMANT in this source snapshot**, not active architecture. Historical names are not proof of LEGACY intent. Do not load or revive them during redesign.
+- `user/dashboard.php` server-renders its content. It does not include `dashboard_dynamic_content.php`, load `dashboard-live.js`, or emit a `data-dashboard-dynamic-root`. `dashboard_dynamic.php` still exists as a directly requestable authenticated endpoint; a dormant JS reference is not proof of a current consumer.
+- A plain direct GET to a role page normally redirects into the shell via `shell-bridge.js`. Test the intentional direct-page path with `?__shell=0` (or `&__shell=0`), separately from the ordinary direct-entry redirect. POST eligibility and auth redirects also need separate tests.
+- `requireLogin()` can require account verification. `app-shell.js::promoteAuthPage` does not list `verify_account.php`; verification behavior inside the iframe is an explicit HIGH-risk UNKNOWN until observed.
+- `auth.php` calls `keyHistoryScheduleAutoCleanup()` at bootstrap. Request-time/background side effects must be traced; authenticated GET is not automatically a side-effect-free Production probe.
+
+## Evidence and activity classification gate
+
+Maintain two fields: **source classification** and **runtime observation**. ACTIVE means a traced current consumer in the stated source context; CONDITIONAL requires its exact gate; DORMANT means no discovered current loader/consumer; LEGACY requires explicit retirement evidence; UNKNOWN records unresolved reachability/ownership. No source classification alone proves observed execution. All browser/DB/mobile behavior remains UNTESTED until exercised in an isolated non-production environment with matching schema, representative settings and roles. Do not relabel UNTESTED as PASS from syntax, static search, screenshots of a mock, or HTTP 200.
+
+Inventory must include root endpoints, Auth/Verification, Store API, cron/worker, shared fragments and server access rules, not only role menus. Asset tables must give consumer, condition, render context and evidence. Absence of an in-repository reference does not prove an endpoint has no external caller.
+
+Before UI implementation: resolve HIGH/Critical ownership unknowns, capture authenticated baseline through shell and direct escape, verify loaded assets/network/DOM ownership, then obtain pilot approval per Phase A. Never activate dormant code to make a test pass. Fast-nav tests are N/A for the traced source route unless a real loader is discovered; test ordinary navigation and active instant-filter behavior instead.
+
+See `docs/redesign-audit/` for evidence, limitations, pilot scope and test matrix. Audit work changes documentation only. No Production writes, broad FTP workflow, merge or auto-merge are authorized.
+
+---
+
 # 1. บทเรียนจากรอบที่ล้มเหลว
 
 รอบก่อนล้มเหลวไม่ใช่เพราะ CSS อย่างเดียว แต่เกิดจากการเข้าใจ architecture ไม่ครบก่อนแก้

@@ -1,0 +1,149 @@
+name: Production UI Compare (Read Only)
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/production-ui-compare.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-ui-compare
+  cancel-in-progress: true
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      FTP_HOST: ${{ secrets.FTP_HOST }}
+      FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
+      FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+      FTP_REMOTE_DIR: ${{ secrets.FTP_REMOTE_DIR }}
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - name: Validate read-only compare prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in FTP_HOST FTP_USERNAME FTP_PASSWORD; do
+            if [ -z "${!name:-}" ]; then
+              echo "Missing required GitHub Actions secret: $name"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+          test -f public_html/app.php
+          test -f public_html/assets/css/sakazuki-ui.css
+          test -f public_html/assets/js/nav.js
+          echo "Read-only comparison prerequisites are present."
+
+      - name: Resolve production root without modifying it
+        shell: bash
+        run: |
+          set -euo pipefail
+          host="${FTP_HOST#ftp://}"
+          host="${host#ftps://}"
+          host="${host%/}"
+          remote="${FTP_REMOTE_DIR#/}"
+          remote="${remote%/}"
+          sentinel="app.php"
+
+          test_candidate() {
+            label="$1"
+            base="$2"
+            tmp="$(mktemp)"
+            if curl --silent --show-error --fail --globoff \
+              --connect-timeout 15 --max-time 45 \
+              --user "$FTP_USERNAME:$FTP_PASSWORD" \
+              --output "$tmp" "${base}/${sentinel}" 2>/dev/null; then
+              if cmp -s "public_html/${sentinel}" "$tmp"; then
+                rm -f "$tmp"
+                echo "FTP_BASE_URL=$base" >> "$GITHUB_ENV"
+                echo "Production root resolved safely: $label (sentinel matches GitHub main)."
+                return 0
+              fi
+              echo "Candidate reachable but sentinel differs: $label"
+            fi
+            rm -f "$tmp"
+            return 1
+          }
+
+          if [ -n "$remote" ] && test_candidate "configured login-relative path" "ftp://$host/$remote"; then exit 0; fi
+          if [ -n "$remote" ] && test_candidate "configured absolute path" "ftp://$host//$remote"; then exit 0; fi
+          if test_candidate "FTP account root" "ftp://$host"; then exit 0; fi
+          if test_candidate "public_html below FTP account root" "ftp://$host/public_html"; then exit 0; fi
+
+          echo "Could not identify production public_html safely. No remote files were modified."
+          exit 2
+
+      - name: Compare UI assets with production
+        shell: bash
+        run: |
+          set -euo pipefail
+          files=(
+            "assets/css/sakazuki-ui.css"
+            "assets/js/nav.js"
+          )
+
+          matches=0
+          differs=0
+          missing=0
+
+          {
+            echo "## Production UI comparison"
+            echo
+            echo "This workflow is read-only. It downloaded production files for comparison and did not upload, overwrite, rename, chmod, or delete anything."
+            echo
+            echo "| File | Production status | Local SHA-256 | Production SHA-256 |"
+            echo "|---|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          for rel in "${files[@]}"; do
+            local_file="public_html/$rel"
+            tmp="$(mktemp)"
+            local_sha="$(sha256sum "$local_file" | awk '{print $1}')"
+
+            if curl --silent --show-error --fail --globoff \
+              --connect-timeout 15 --max-time 45 \
+              --user "$FTP_USERNAME:$FTP_PASSWORD" \
+              --output "$tmp" "${FTP_BASE_URL}/${rel}" 2>/dev/null; then
+              remote_sha="$(sha256sum "$tmp" | awk '{print $1}')"
+              if cmp -s "$local_file" "$tmp"; then
+                status="MATCH"
+                matches=$((matches + 1))
+              else
+                status="DIFFERS"
+                differs=$((differs + 1))
+              fi
+              echo "| \`$rel\` | $status | \`$local_sha\` | \`$remote_sha\` |" >> "$GITHUB_STEP_SUMMARY"
+              echo "$rel: $status"
+            else
+              status="MISSING_OR_UNREADABLE"
+              missing=$((missing + 1))
+              echo "| \`$rel\` | $status | \`$local_sha\` | - |" >> "$GITHUB_STEP_SUMMARY"
+              echo "$rel: $status"
+            fi
+            rm -f "$tmp"
+          done
+
+          {
+            echo
+            echo "Matches: $matches  "
+            echo "Differs: $differs  "
+            echo "Missing/unreadable: $missing"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "Comparison complete. No production changes were made."

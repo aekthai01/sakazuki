@@ -52,24 +52,34 @@ jobs:
           host="${host%/}"
           remote="${FTP_REMOTE_DIR#/}"
           remote="${remote%/}"
+          sentinel="app.php"
 
-          if curl --silent --show-error --fail --connect-timeout 15 --max-time 45 \
-            --user "$FTP_USERNAME:$FTP_PASSWORD" --list-only \
-            "ftp://$host/$remote/" >/dev/null; then
-            echo "FTP_BASE_URL=ftp://$host/$remote" >> "$GITHUB_ENV"
-            echo "Production directory resolved as login-relative path."
-            exit 0
-          fi
+          test_candidate() {
+            label="$1"
+            base="$2"
+            tmp="$(mktemp)"
+            if curl --silent --show-error --fail --globoff \
+              --connect-timeout 15 --max-time 45 \
+              --user "$FTP_USERNAME:$FTP_PASSWORD" \
+              --output "$tmp" "${base}/${sentinel}" 2>/dev/null; then
+              if cmp -s "public_html/${sentinel}" "$tmp"; then
+                rm -f "$tmp"
+                echo "FTP_BASE_URL=$base" >> "$GITHUB_ENV"
+                echo "Production root resolved: $label (sentinel matches GitHub main)."
+                return 0
+              fi
+              echo "Candidate reachable but sentinel differs: $label"
+            fi
+            rm -f "$tmp"
+            return 1
+          }
 
-          if curl --silent --show-error --fail --connect-timeout 15 --max-time 45 \
-            --user "$FTP_USERNAME:$FTP_PASSWORD" --list-only \
-            "ftp://$host//$remote/" >/dev/null; then
-            echo "FTP_BASE_URL=ftp://$host//$remote" >> "$GITHUB_ENV"
-            echo "Production directory resolved as absolute FTP path."
-            exit 0
-          fi
+          if [ -n "$remote" ] && test_candidate "configured login-relative path" "ftp://$host/$remote"; then exit 0; fi
+          if [ -n "$remote" ] && test_candidate "configured absolute path" "ftp://$host//$remote"; then exit 0; fi
+          if test_candidate "FTP account root" "ftp://$host"; then exit 0; fi
+          if test_candidate "public_html below FTP account root" "ftp://$host/public_html"; then exit 0; fi
 
-          echo "FTP authentication or FTP_REMOTE_DIR validation failed."
+          echo "Could not identify production public_html safely. No files were changed."
           exit 2
 
       - name: Compare tracked public_html files with production
@@ -87,39 +97,28 @@ jobs:
             file="$1"
             rel="${file#public_html/}"
             tmp="$(mktemp)"
+            err_file="$(mktemp)"
             url="${FTP_BASE_URL}/${rel}"
 
             if curl --silent --show-error --fail --globoff \
               --retry 2 --retry-delay 1 --retry-all-errors \
               --connect-timeout 15 --max-time 90 \
               --user "$FTP_USERNAME:$FTP_PASSWORD" \
-              --output "$tmp" "$url" 2>/tmp/curl_err.$$; then
+              --output "$tmp" "$url" 2>"$err_file"; then
               if cmp -s "$file" "$tmp"; then
-                (
-                  flock 9
-                  printf '%s\n' "$rel" >&9
-                ) 9>>/tmp/identical.txt
+                ( flock 9; printf '%s\n' "$rel" >&9 ) 9>>/tmp/identical.txt
               else
-                (
-                  flock 9
-                  printf '%s\n' "$rel" >&9
-                ) 9>>/tmp/different.txt
+                ( flock 9; printf '%s\n' "$rel" >&9 ) 9>>/tmp/different.txt
               fi
             else
-              err="$(cat /tmp/curl_err.$$ 2>/dev/null || true)"
-              if printf '%s' "$err" | grep -Eq '550|404|not found|No such file'; then
-                (
-                  flock 9
-                  printf '%s\n' "$rel" >&9
-                ) 9>>/tmp/missing.txt
+              err="$(cat "$err_file" 2>/dev/null || true)"
+              if printf '%s' "$err" | grep -Eqi '550|404|not found|No such file'; then
+                ( flock 9; printf '%s\n' "$rel" >&9 ) 9>>/tmp/missing.txt
               else
-                (
-                  flock 9
-                  printf '%s\n' "$rel" >&9
-                ) 9>>/tmp/errors.txt
+                ( flock 9; printf '%s\n' "$rel" >&9 ) 9>>/tmp/errors.txt
               fi
             fi
-            rm -f "$tmp" /tmp/curl_err.$$
+            rm -f "$tmp" "$err_file"
           }
           export -f compare_one
 

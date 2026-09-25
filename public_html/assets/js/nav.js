@@ -34,7 +34,7 @@
         if (!role || document.querySelector('link[data-sakazuki-ui]')) return;
         const link = document.createElement('link');
         link.rel = 'stylesheet';
-        link.href = '/assets/css/sakazuki-ui.css?v=20260925-2';
+        link.href = '/assets/css/sakazuki-ui.css?v=20260925-3';
         link.setAttribute('data-sakazuki-ui', '1');
         document.head.appendChild(link);
     }

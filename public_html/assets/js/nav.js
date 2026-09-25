@@ -1,4 +1,4 @@
-/**
+/** 
  * Shared responsive navigation behaviour.
  *
  * Keeps drawer/logout access stable even when more menu items are added.
@@ -11,6 +11,8 @@
 
     if (window.__appNavReady) return;
     window.__appNavReady = true;
+
+    const STORE_ASSET_VERSION = '20260925-1';
 
     function resolveRole() {
         const path = String(window.location.pathname || '').toLowerCase();
@@ -39,6 +41,43 @@
         link.href = '/assets/css/sakazuki-ui.css?v=20260925-3';
         link.setAttribute('data-sakazuki-ui', '1');
         document.head.appendChild(link);
+    }
+
+    function ensureStoreUiAssets() {
+        if (role !== 'user' && role !== 'reseller') return;
+
+        const page = resolvePage();
+        if (page !== 'buy') {
+            if (window.SakazukiStoreV2 && typeof window.SakazukiStoreV2.sync === 'function') {
+                window.SakazukiStoreV2.sync();
+            }
+            return;
+        }
+
+        if (!document.querySelector('link[data-sakazuki-store-v2]')) {
+            const link = document.createElement('link');
+            link.rel = 'stylesheet';
+            link.href = '/assets/css/store-v2.css?v=' + STORE_ASSET_VERSION;
+            link.setAttribute('data-sakazuki-store-v2', '1');
+            document.head.appendChild(link);
+        }
+
+        if (window.SakazukiStoreV2 && typeof window.SakazukiStoreV2.sync === 'function') {
+            window.SakazukiStoreV2.sync();
+            return;
+        }
+
+        if (document.querySelector('script[data-sakazuki-store-v2]')) return;
+        const script = document.createElement('script');
+        script.src = '/assets/js/store-v2.js?v=' + STORE_ASSET_VERSION;
+        script.defer = true;
+        script.setAttribute('data-sakazuki-store-v2', '1');
+        script.addEventListener('load', function () {
+            if (window.SakazukiStoreV2 && typeof window.SakazukiStoreV2.sync === 'function') {
+                window.SakazukiStoreV2.sync();
+            }
+        }, { once: true });
+        document.head.appendChild(script);
     }
 
     function applyPageContext(href) {
@@ -268,6 +307,7 @@
         buildMobileNavigation();
         updateMobileNavigation();
         improveTouchLabels();
+        ensureStoreUiAssets();
     }
 
     window.openDrawer = openDrawer;
@@ -276,6 +316,7 @@
 
     ensureUiStyles();
     applyPageContext();
+    ensureStoreUiAssets();
 
     document.addEventListener('click', function (event) {
         const toggle = event.target.closest('[data-nav-dropdown-toggle]');

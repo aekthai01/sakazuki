@@ -111,7 +111,8 @@ body.sk-app-shell .nav-topbar-row > .nav-primary-cluster > a {
 }
 
 body.sk-app-shell .nav-primary-cluster > button[data-nav-drawer-toggle],
-body.sk-app-shell [data-nav-drawer-close] {
+body.sk-app-shell [data-nav-drawer-close],
+body.sk-app-shell #drawer > div:first-child > button {
     min-width: 44px;
     min-height: 44px;
     border-radius: 12px;
@@ -121,7 +122,8 @@ body.sk-app-shell [data-nav-drawer-close] {
 }
 
 body.sk-app-shell .nav-primary-cluster > button[data-nav-drawer-toggle]:active,
-body.sk-app-shell [data-nav-drawer-close]:active {
+body.sk-app-shell [data-nav-drawer-close]:active,
+body.sk-app-shell #drawer > div:first-child > button:active {
     background: rgba(var(--sk-primary-rgb), 0.12);
 }
 
@@ -280,7 +282,7 @@ body.sk-role-admin table td {
     gap: 3px;
     border-radius: 13px !important;
     color: #8290a6;
-    font-size: 10px;
+    font-size: 11px;
     font-weight: 600;
     line-height: 1.1;
     text-align: center;
@@ -539,8 +541,7 @@ body.sk-role-admin main textarea {
 }
 
 body.sk-role-admin [role="dialog"],
-body.sk-role-admin .modal,
-body.sk-role-admin [class*="modal"] {
+body.sk-role-admin .modal {
     max-width: min(94vw, 64rem);
 }
 
@@ -713,7 +714,7 @@ body.sk-role-admin [class*="modal"] {
         order: -1;
     }
 
-    body.sk-role-admin table {
+    body.sk-role-admin .overflow-x-auto table {
         min-width: max-content;
     }
 
@@ -736,7 +737,7 @@ body.sk-role-admin [class*="modal"] {
     }
 
     .sk-mobile-nav__item {
-        font-size: 9px;
+        font-size: 10px;
     }
 }
 

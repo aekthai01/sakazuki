@@ -1,0 +1,6 @@
+Approved production deployment
+Date: 2026-09-25
+Scope:
+- public_html/assets/css/sakazuki-ui.css
+- public_html/assets/js/nav.js
+Authorization: user explicitly approved deployment of these two files in ChatGPT.

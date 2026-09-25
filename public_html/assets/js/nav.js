@@ -3,6 +3,8 @@
  *
  * Keeps drawer/logout access stable even when more menu items are added.
  * The server remains responsible for authentication and CSRF validation.
+ * This file also attaches the shared presentation layer without changing any
+ * purchase, stock, account, API, or security business logic.
  */
 (function () {
     'use strict';
@@ -10,7 +12,47 @@
     if (window.__appNavReady) return;
     window.__appNavReady = true;
 
-    const drawerBreakpoint = 1536;
+    function resolveRole() {
+        const path = String(window.location.pathname || '').toLowerCase();
+        if (path.indexOf('/admin/') !== -1) return 'admin';
+        if (path.indexOf('/reseller/') !== -1) return 'reseller';
+        if (path.indexOf('/user/') !== -1) return 'user';
+        return '';
+    }
+
+    function resolvePage(href) {
+        let path = String(window.location.pathname || '');
+        if (href) {
+            try { path = new URL(href, window.location.href).pathname; } catch (_) {}
+        }
+        const piece = path.split('/').filter(Boolean).pop() || 'dashboard.php';
+        return piece.replace(/\.php$/i, '').replace(/[^a-z0-9_-]+/gi, '_').toLowerCase() || 'dashboard';
+    }
+
+    const role = resolveRole();
+    const drawerBreakpoint = role === 'admin' ? 1536 : 1200;
+
+    function ensureUiStyles() {
+        if (!role || document.querySelector('link[data-sakazuki-ui]')) return;
+        const link = document.createElement('link');
+        link.rel = 'stylesheet';
+        link.href = '/assets/css/sakazuki-ui.css?v=20260925-3';
+        link.setAttribute('data-sakazuki-ui', '1');
+        document.head.appendChild(link);
+    }
+
+    function applyPageContext(href) {
+        if (!document.body || !role) return;
+        const page = resolvePage(href);
+        Array.from(document.body.classList).forEach(function (className) {
+            if (/^sk-role-/.test(className) || /^sk-page-/.test(className)) {
+                document.body.classList.remove(className);
+            }
+        });
+        document.body.classList.add('sk-app-shell', 'sk-role-' + role, 'sk-page-' + page);
+        document.body.setAttribute('data-sk-role', role);
+        document.body.setAttribute('data-sk-page', page);
+    }
 
     function getDrawer() {
         return document.getElementById('drawer');
@@ -100,9 +142,140 @@
         closeDropdowns();
     }
 
+    function normalizedPathname(href) {
+        try {
+            const url = new URL(href, window.location.href);
+            return url.pathname.replace(/\/+$/, '').toLowerCase();
+        } catch (_) {
+            return '';
+        }
+    }
+
+    function markCurrentNavigation() {
+        const currentPath = normalizedPathname(window.location.href);
+        document.querySelectorAll('.nav-primary-cluster nav a[href], #drawer a[href]').forEach(function (link) {
+            const linkPath = normalizedPathname(link.href);
+            const active = !!linkPath && linkPath === currentPath;
+            link.classList.toggle('is-current', active);
+            if (active) link.setAttribute('aria-current', 'page');
+            else link.removeAttribute('aria-current');
+        });
+    }
+
+    function mobileNavItems() {
+        if (role !== 'user' && role !== 'reseller') return [];
+        const isEnglish = String(document.documentElement.lang || '').toLowerCase().indexOf('en') === 0;
+        return [
+            {
+                key: 'home',
+                href: 'dashboard.php',
+                icon: 'bi-house-door-fill',
+                label: isEnglish ? 'Home' : 'หน้าหลัก',
+                pages: ['dashboard']
+            },
+            {
+                key: 'store',
+                href: 'buy.php',
+                icon: 'bi-bag-check-fill',
+                label: isEnglish ? 'Store' : 'ร้านค้า',
+                pages: ['buy']
+            },
+            {
+                key: 'keys',
+                href: 'mykeys.php',
+                icon: 'bi-key-fill',
+                label: isEnglish ? 'Keys' : 'คีย์',
+                pages: ['mykeys', 'key_resets', 'key_reset_status', 'reset_hwid']
+            },
+            {
+                key: 'account',
+                href: 'account.php',
+                icon: 'bi-person-circle',
+                label: isEnglish ? 'Account' : 'บัญชี',
+                pages: [
+                    'account', 'history', 'rankings', 'deposit', 'redeem_angpao',
+                    'reseller_program', 'api_store', 'api_store_download'
+                ]
+            }
+        ];
+    }
+
+    function updateMobileNavigation() {
+        const currentPage = resolvePage();
+        const byKey = new Map(mobileNavItems().map(function (item) { return [item.key, item]; }));
+        document.querySelectorAll('[data-sk-mobile-nav]').forEach(function (link) {
+            const item = byKey.get(link.getAttribute('data-sk-mobile-nav') || '');
+            const active = !!(item && item.pages.indexOf(currentPage) !== -1);
+            link.classList.toggle('is-current', active);
+            if (active) link.setAttribute('aria-current', 'page');
+            else link.removeAttribute('aria-current');
+        });
+    }
+
+    function buildMobileNavigation() {
+        if (!document.body || document.querySelector('.sk-mobile-nav')) {
+            updateMobileNavigation();
+            return;
+        }
+        const items = mobileNavItems();
+        if (!items.length) return;
+
+        const isEnglish = String(document.documentElement.lang || '').toLowerCase().indexOf('en') === 0;
+        const nav = document.createElement('nav');
+        nav.className = 'sk-mobile-nav';
+        nav.setAttribute('aria-label', isEnglish ? 'Primary mobile navigation' : 'เมนูหลักบนมือถือ');
+
+        items.forEach(function (item) {
+            const link = document.createElement('a');
+            link.href = item.href;
+            link.className = 'sk-mobile-nav__item';
+            link.setAttribute('data-sk-mobile-nav', item.key);
+
+            const icon = document.createElement('i');
+            icon.className = 'bi ' + item.icon;
+            icon.setAttribute('aria-hidden', 'true');
+
+            const label = document.createElement('span');
+            label.textContent = item.label;
+
+            link.appendChild(icon);
+            link.appendChild(label);
+            nav.appendChild(link);
+        });
+
+        document.body.appendChild(nav);
+        updateMobileNavigation();
+    }
+
+    function improveTouchLabels() {
+        document.querySelectorAll('[data-nav-drawer-toggle]').forEach(function (button) {
+            if (!button.getAttribute('aria-label')) {
+                button.setAttribute('aria-label', 'Open navigation menu');
+            }
+        });
+
+        const drawer = getDrawer();
+        if (!drawer) return;
+        drawer.querySelectorAll('button').forEach(function (button) {
+            const icon = button.querySelector('.bi-x, .bi-x-lg');
+            if (icon && !button.getAttribute('aria-label')) button.setAttribute('aria-label', 'Close navigation menu');
+        });
+    }
+
+    function syncUiContext(href) {
+        applyPageContext(href);
+        markCurrentNavigation();
+        buildMobileNavigation();
+        updateMobileNavigation();
+        improveTouchLabels();
+    }
+
     window.openDrawer = openDrawer;
     window.closeDrawer = closeDrawer;
     window.toggleDropdown = toggleDropdown;
+
+    ensureUiStyles();
+    applyPageContext();
 
     document.addEventListener('click', function (event) {
         const toggle = event.target.closest('[data-nav-dropdown-toggle]');
@@ -129,11 +302,15 @@
         setDrawerState(false);
     });
 
+    document.addEventListener('fastnav:after', function (event) {
+        const nextUrl = event && event.detail ? event.detail.url : window.location.href;
+        syncUiContext(nextUrl);
+    });
+
     // Do not close menus on every resize. Mobile browsers routinely resize the
     // visual viewport when their address/navigation bars expand or collapse,
     // which previously made a freshly opened menu close itself at random.
-    // Only reset when the CSS navigation layout actually crosses the 2xl
-    // desktop breakpoint.
+    // Only reset when the role's actual navigation layout breakpoint changes.
     if (typeof window.matchMedia === 'function') {
         const desktopNavQuery = window.matchMedia('(min-width: ' + drawerBreakpoint + 'px)');
         const handleLayoutChange = function () { resetTransientNavState(); };
@@ -149,6 +326,7 @@
     // when the document itself was restored from the back-forward cache.
     window.addEventListener('pageshow', function (event) {
         if (event.persisted) resetTransientNavState();
+        syncUiContext();
     });
 
     document.addEventListener('DOMContentLoaded', function () {
@@ -160,5 +338,6 @@
         dropdownMenus().forEach(function (menu) {
             setDropdownState(menu, !menu.classList.contains('hidden'));
         });
+        syncUiContext();
     }, { once: true });
 })();

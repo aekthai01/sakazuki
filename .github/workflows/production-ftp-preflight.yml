@@ -1,0 +1,173 @@
+name: Production FTP Preflight
+
+on:
+  push:
+    branches:
+      - ops/ftp-production-preflight-20260925
+    paths:
+      - .github/workflows/production-ftp-preflight.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      FTP_HOST: ${{ secrets.FTP_HOST }}
+      FTP_USERNAME: ${{ secrets.FTP_USERNAME }}
+      FTP_PASSWORD: ${{ secrets.FTP_PASSWORD }}
+      FTP_REMOTE_DIR: ${{ secrets.FTP_REMOTE_DIR }}
+    steps:
+      - name: Checkout current main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 1
+
+      - name: Validate FTP secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in FTP_HOST FTP_USERNAME FTP_PASSWORD FTP_REMOTE_DIR; do
+            if [ -z "${!name:-}" ]; then
+              echo "Missing required GitHub Actions secret: $name"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+          echo "FTP secrets are configured. Values are intentionally hidden."
+
+      - name: Resolve production remote directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          host="${FTP_HOST#ftp://}"
+          host="${host#ftps://}"
+          host="${host%/}"
+          remote="${FTP_REMOTE_DIR#/}"
+          remote="${remote%/}"
+
+          if curl --silent --show-error --fail --connect-timeout 15 --max-time 45 \
+            --user "$FTP_USERNAME:$FTP_PASSWORD" --list-only \
+            "ftp://$host/$remote/" >/dev/null; then
+            echo "FTP_BASE_URL=ftp://$host/$remote" >> "$GITHUB_ENV"
+            echo "Production directory resolved as login-relative path."
+            exit 0
+          fi
+
+          if curl --silent --show-error --fail --connect-timeout 15 --max-time 45 \
+            --user "$FTP_USERNAME:$FTP_PASSWORD" --list-only \
+            "ftp://$host//$remote/" >/dev/null; then
+            echo "FTP_BASE_URL=ftp://$host//$remote" >> "$GITHUB_ENV"
+            echo "Production directory resolved as absolute FTP path."
+            exit 0
+          fi
+
+          echo "FTP authentication or FTP_REMOTE_DIR validation failed."
+          exit 2
+
+      - name: Compare tracked public_html files with production
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > /tmp/identical.txt
+          : > /tmp/different.txt
+          : > /tmp/missing.txt
+          : > /tmp/errors.txt
+
+          export FTP_BASE_URL FTP_USERNAME FTP_PASSWORD
+
+          compare_one() {
+            file="$1"
+            rel="${file#public_html/}"
+            tmp="$(mktemp)"
+            url="${FTP_BASE_URL}/${rel}"
+
+            if curl --silent --show-error --fail --globoff \
+              --retry 2 --retry-delay 1 --retry-all-errors \
+              --connect-timeout 15 --max-time 90 \
+              --user "$FTP_USERNAME:$FTP_PASSWORD" \
+              --output "$tmp" "$url" 2>/tmp/curl_err.$$; then
+              if cmp -s "$file" "$tmp"; then
+                (
+                  flock 9
+                  printf '%s\n' "$rel" >&9
+                ) 9>>/tmp/identical.txt
+              else
+                (
+                  flock 9
+                  printf '%s\n' "$rel" >&9
+                ) 9>>/tmp/different.txt
+              fi
+            else
+              err="$(cat /tmp/curl_err.$$ 2>/dev/null || true)"
+              if printf '%s' "$err" | grep -Eq '550|404|not found|No such file'; then
+                (
+                  flock 9
+                  printf '%s\n' "$rel" >&9
+                ) 9>>/tmp/missing.txt
+              else
+                (
+                  flock 9
+                  printf '%s\n' "$rel" >&9
+                ) 9>>/tmp/errors.txt
+              fi
+            fi
+            rm -f "$tmp" /tmp/curl_err.$$
+          }
+          export -f compare_one
+
+          git ls-files -z 'public_html/**' | xargs -0 -r -n 1 -P 8 bash -c 'compare_one "$1"' _
+
+          identical="$(wc -l < /tmp/identical.txt | tr -d ' ')"
+          different="$(wc -l < /tmp/different.txt | tr -d ' ')"
+          missing="$(wc -l < /tmp/missing.txt | tr -d ' ')"
+          errors="$(wc -l < /tmp/errors.txt | tr -d ' ')"
+          total=$((identical + different + missing + errors))
+
+          echo "Compared tracked public_html files: $total"
+          echo "Identical: $identical"
+          echo "Different: $different"
+          echo "Missing on production: $missing"
+          echo "Read errors: $errors"
+
+          if [ "$different" -gt 0 ]; then
+            echo "--- Files different from GitHub main (paths only) ---"
+            sort -u /tmp/different.txt | head -100
+          fi
+          if [ "$missing" -gt 0 ]; then
+            echo "--- Files tracked in GitHub but missing on production (paths only) ---"
+            sort -u /tmp/missing.txt | head -100
+          fi
+          if [ "$errors" -gt 0 ]; then
+            echo "--- Files that could not be compared (paths only) ---"
+            sort -u /tmp/errors.txt | head -100
+            exit 3
+          fi
+
+          echo "No files were uploaded, modified, or deleted by this preflight."
+
+      - name: Check critical xNearby integration files explicitly
+        shell: bash
+        run: |
+          set -euo pipefail
+          for rel in \
+            includes/functions.php \
+            includes/slip_nearby.php \
+            admin/settings.php; do
+            if grep -Fxq "$rel" /tmp/identical.txt; then
+              echo "MATCH: $rel"
+            elif grep -Fxq "$rel" /tmp/different.txt; then
+              echo "DIFFERENT: $rel"
+            elif grep -Fxq "$rel" /tmp/missing.txt; then
+              echo "MISSING: $rel"
+            else
+              echo "UNKNOWN: $rel"
+            fi
+          done

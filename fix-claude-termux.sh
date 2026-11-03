@@ -12,7 +12,7 @@ case "$PWD" in
   *) WD="/root" ;;
 esac
 exec proot-distro login ubuntu --shared-tmp --bind "$TH:/termux-home" -- \
-  bash -lc 'cd "$1" 2>/dev/null || cd ~; shift; exec ~/.local/bin/claude "$@"' _ "$WD" "$@"
+  bash -lc 'cd "$1" 2>/dev/null || cd ~; shift; ~/.local/bin/claude "$@"; rc=$?; web-browser-down >/dev/null 2>&1; exit $rc' _ "$WD" "$@"
 WRAPPER
 chmod +x "$P/bin/claude"
 

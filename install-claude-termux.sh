@@ -59,7 +59,11 @@ install_npm() {
   add_line "export USE_BUILTIN_RIPGREP=0"
 
   info "ติดตั้ง @anthropic-ai/claude-code ผ่าน npm..."
-  npm install -g @anthropic-ai/claude-code || { warn "npm install ล้มเหลว"; return 1; }
+  # npm >= 12 บล็อก postinstall script เป็นค่าเริ่มต้น ต้องอนุญาตให้ claude-code
+  npm config set allow-scripts=@anthropic-ai/claude-code --location=user >/dev/null 2>&1 || true
+  npm install -g --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code 2>/dev/null \
+    || npm install -g @anthropic-ai/claude-code \
+    || { warn "npm install ล้มเหลว"; return 1; }
 
   hash -r
   if command -v claude >/dev/null 2>&1 && claude --version >/dev/null 2>&1; then
@@ -76,11 +80,15 @@ install_proot() {
   info "สลับไปใช้ Ubuntu ผ่าน proot-distro..."
   pkg install -y proot-distro >/dev/null 2>&1 || die "ติดตั้ง proot-distro ไม่สำเร็จ"
 
-  if [ ! -d "$PREFIX/var/lib/proot-distro/installed-rootfs/ubuntu" ]; then
-    info "ดาวน์โหลด Ubuntu rootfs (ประมาณ 50-100MB)..."
-    proot-distro install ubuntu || die "ติดตั้ง Ubuntu ไม่สำเร็จ"
+  # เช็กด้วยการ login จริง (proot-distro แต่ละเวอร์ชันเก็บ rootfs คนละที่)
+  if proot-distro login ubuntu -- true >/dev/null 2>&1; then
+    ok "มี Ubuntu อยู่แล้ว ใช้ตัวเดิม"
   else
-    ok "มี Ubuntu อยู่แล้ว"
+    info "ดาวน์โหลด Ubuntu rootfs (ประมาณ 50-100MB)..."
+    if ! proot-distro install ubuntu; then
+      warn "ติดตั้งไม่ผ่าน ลอง reset Ubuntu ใหม่..."
+      proot-distro reset ubuntu || die "ติดตั้ง Ubuntu ไม่สำเร็จ"
+    fi
   fi
 
   info "ติดตั้ง Claude Code ภายใน Ubuntu..."

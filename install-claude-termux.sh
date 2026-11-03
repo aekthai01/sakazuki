@@ -107,15 +107,12 @@ install_proot() {
   cat > "$PREFIX/bin/claude" <<'EOF'
 #!/data/data/com.termux/files/usr/bin/bash
 TH="/data/data/com.termux/files/home"
-CWD="$PWD"
-case "$CWD" in
-  "$TH"*) WD="/termux-home${CWD#$TH}" ;;
-  /storage/emulated/0*|/sdcard*) WD="$CWD" ;;
+case "$PWD" in
+  "$TH"*) WD="/termux-home${PWD#$TH}" ;;
+  /storage/emulated/0*|/sdcard*) WD="$PWD" ;;   # proot-distro ผูก /sdcard ให้อยู่แล้ว
   *) WD="/root" ;;
 esac
-BINDS=(--bind "$TH:/termux-home")
-[ -d /storage/emulated/0 ] && BINDS+=(--bind /storage/emulated/0:/storage/emulated/0 --bind /storage/emulated/0:/sdcard)
-exec proot-distro login ubuntu --shared-tmp "${BINDS[@]}" -- \
+exec proot-distro login ubuntu --shared-tmp --bind "$TH:/termux-home" -- \
   bash -lc 'cd "$1" 2>/dev/null || cd ~; shift; exec ~/.local/bin/claude "$@"' _ "$WD" "$@"
 EOF
   chmod +x "$PREFIX/bin/claude"

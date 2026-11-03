@@ -22,14 +22,23 @@ warn() { printf "${Y}[!]${N} %s\n" "$*"; }
 die()  { printf "${R}[X]${N} %s\n" "$*" >&2; exit 1; }
 
 # ================= ส่วนที่ 1: รันใน Termux =================
-if [ "${1:-}" != "--inside" ]; then
+if [ "${1:-}" != "--inside" ] && [ "${1:-}" != "--inside-npm" ]; then
   command -v proot-distro >/dev/null 2>&1 || die "ไม่พบ proot-distro — รัน install-claude-termux.sh --proot ก่อน"
   proot-distro login ubuntu -- true >/dev/null 2>&1 || die "ยังไม่มี Ubuntu — รัน install-claude-termux.sh --proot ก่อน"
 
   warn "จะใช้พื้นที่ประมาณ 1-1.5 GB และเวลา 10-30 นาที (ขึ้นกับเน็ต)"
   SELF="$(realpath "$0")"
-  proot-distro login ubuntu --shared-tmp --bind "$(dirname "$SELF"):/mnt/websetup" -- \
-    bash "/mnt/websetup/$(basename "$SELF")" --inside || die "ติดตั้งใน Ubuntu ไม่สำเร็จ (ดู error ด้านบน)"
+  BIND=(--shared-tmp --bind "$(dirname "$SELF"):/mnt/websetup")
+  RUN="/mnt/websetup/$(basename "$SELF")"
+  if [ "${1:-}" != "--npm" ]; then
+    proot-distro login ubuntu "${BIND[@]}" -- bash "$RUN" --inside \
+      || die "ติดตั้งใน Ubuntu ไม่สำเร็จ (ดู error ด้านบน)"
+  fi
+  # npm พังใน proot เพราะระบบจำลอง hardlink (link2symlink) -> ติดตั้ง npm โดยปิดระบบนั้น
+  info "[5/8] ติดตั้งเครื่องมือเว็บ + MCP ผ่าน npm..."
+  proot-distro login ubuntu --no-link2symlink "${BIND[@]}" -- bash "$RUN" --inside-npm \
+    || proot-distro login ubuntu "${BIND[@]}" -- bash "$RUN" --inside-npm \
+    || warn "npm บางตัวยังไม่สำเร็จ — รันซ้ำเฉพาะส่วนนี้ได้ด้วย: bash $(basename "$SELF") --npm"
 
   # อัปเดตคำสั่ง claude ใน Termux: ปิด Chromium ให้อัตโนมัติหลัง /exit (ไม่งั้น Termux ค้าง)
   P="${PREFIX:-/data/data/com.termux/files/usr}"
@@ -60,6 +69,31 @@ WRAPPER
 ตั้งค่าโฮสต์ (ครั้งเดียวต่อโปรเจกต์): ในโฟลเดอร์เว็บพิมพ์
      claude  แล้วสั่ง  "ตั้งค่า webdeploy ให้หน่อย"   หรือคัดลอก ~/.deploy.env.example มาเป็น .deploy.env
 EOF
+  exit 0
+fi
+
+# ---------- --inside-npm: ติดตั้งแพ็กเกจ npm (รันแยกโดยปิด link2symlink) ----------
+if [ "${1:-}" = "--inside-npm" ]; then
+  export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"
+  # ใช้ cache ใหม่ทุกครั้ง, ดาวน์โหลดทีละไฟล์, ลองซ้ำ
+  export npm_config_cache="/tmp/npm-cache-$$"
+  rm -rf "$HOME/.npm/_cacache"
+  npm config set maxsockets 1 >/dev/null 2>&1 || true
+  npm config set fetch-retries 5 >/dev/null 2>&1 || true
+  NPM_FAIL=""
+  for pk in chrome-devtools-mcp @playwright/mcp @upstash/context7-mcp \
+            lighthouse prettier html-validate serve ui-ux-pro-max-cli; do
+    done_ok=0
+    for try in 1 2 3; do
+      if npm install -g --no-audit --no-fund "$pk" >/dev/null 2>"$HOME/.npm-err.log"; then done_ok=1; break; fi
+      warn "$pk ล้มเหลว (ครั้งที่ $try) ลองใหม่..."
+      rm -rf "$npm_config_cache"; sleep 2
+    done
+    if [ "$done_ok" = 1 ]; then ok "$pk"; else NPM_FAIL+=" $pk"; tail -5 "$HOME/.npm-err.log"; fi
+  done
+  rm -rf "$npm_config_cache"
+  if [ -n "$NPM_FAIL" ]; then warn "ติดตั้งไม่สำเร็จ:$NPM_FAIL"; exit 1; fi
+  ok "npm ครบทุกตัว"
   exit 0
 fi
 
@@ -140,24 +174,7 @@ chmod +x /usr/local/bin/web-browser-up /usr/local/bin/web-browser-down \
   /usr/local/bin/mcp-chrome-devtools /usr/local/bin/mcp-playwright
 if web-browser-up; then ok "Chromium เปิดได้ (port 9222)"; else warn "Chromium ยังเปิดไม่ได้ — ดู ~/.web-browser.log"; fi
 
-info "[5/8] ติดตั้งเครื่องมือเว็บ + MCP ผ่าน npm (ทีละตัว)..."
-# npm ใน proot มักพังตอนเขียน cache พร้อมกันหลายไฟล์ -> ล้าง cache, ลดการดาวน์โหลดพร้อมกัน, ลองซ้ำ
-npm cache clean --force >/dev/null 2>&1 || true
-rm -rf "$HOME/.npm/_cacache"
-npm config set maxsockets 1 >/dev/null 2>&1 || true
-npm config set fetch-retries 5 >/dev/null 2>&1 || true
-NPM_FAIL=""
-for pk in chrome-devtools-mcp @playwright/mcp @upstash/context7-mcp \
-          lighthouse prettier html-validate serve ui-ux-pro-max-cli; do
-  done_ok=0
-  for try in 1 2 3; do
-    if npm install -g --no-audit --no-fund "$pk" >/dev/null 2>"$HOME/.npm-err.log"; then done_ok=1; break; fi
-    warn "$pk ล้มเหลว (ครั้งที่ $try) ล้าง cache แล้วลองใหม่..."
-    rm -rf "$HOME/.npm/_cacache"; sleep 2
-  done
-  if [ "$done_ok" = 1 ]; then ok "$pk"; else NPM_FAIL+=" $pk"; tail -5 "$HOME/.npm-err.log"; fi
-done
-[ -z "$NPM_FAIL" ] || warn "ติดตั้งไม่สำเร็จ:$NPM_FAIL  (รันสคริปต์นี้ซ้ำได้)"
+# [5/8] npm ติดตั้งแยกในโหมด --inside-npm (ดูด้านบน)
 
 info "[6/8] สร้างคำสั่ง webdeploy / webcheck..."
 cat > /usr/local/bin/webdeploy <<'EOF'

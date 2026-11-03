@@ -129,27 +129,35 @@ EOF
 cat > /usr/local/bin/mcp-chrome-devtools <<'EOF'
 #!/usr/bin/env bash
 web-browser-up >&2 || exit 1
-exec npx -y chrome-devtools-mcp@latest --browserUrl http://127.0.0.1:9222
+exec chrome-devtools-mcp --browserUrl http://127.0.0.1:9222
 EOF
 cat > /usr/local/bin/mcp-playwright <<'EOF'
 #!/usr/bin/env bash
 web-browser-up >&2 || exit 1
-exec npx -y @playwright/mcp@latest --cdp-endpoint http://127.0.0.1:9222
+exec playwright-mcp --cdp-endpoint http://127.0.0.1:9222
 EOF
 chmod +x /usr/local/bin/web-browser-up /usr/local/bin/web-browser-down \
   /usr/local/bin/mcp-chrome-devtools /usr/local/bin/mcp-playwright
 if web-browser-up; then ok "Chromium เปิดได้ (port 9222)"; else warn "Chromium ยังเปิดไม่ได้ — ดู ~/.web-browser.log"; fi
 
-info "[5/8] ติดตั้งเครื่องมือเว็บผ่าน npm..."
-npm install -g --allow-scripts=ui-ux-pro-max-cli \
-  lighthouse prettier html-validate serve ui-ux-pro-max-cli 2>/dev/null \
-  || npm install -g lighthouse prettier html-validate serve ui-ux-pro-max-cli \
-  || warn "ติดตั้งบางตัวไม่สำเร็จ"
-# โหลด MCP ไว้ล่วงหน้า (ครั้งแรกจะได้ไม่ช้า)
-npx -y chrome-devtools-mcp@latest --help >/dev/null 2>&1 || true
-npx -y @playwright/mcp@latest --help >/dev/null 2>&1 || true
-npx -y @upstash/context7-mcp@latest --help >/dev/null 2>&1 || true
-ok "lighthouse prettier html-validate serve uipro"
+info "[5/8] ติดตั้งเครื่องมือเว็บ + MCP ผ่าน npm (ทีละตัว)..."
+# npm ใน proot มักพังตอนเขียน cache พร้อมกันหลายไฟล์ -> ล้าง cache, ลดการดาวน์โหลดพร้อมกัน, ลองซ้ำ
+npm cache clean --force >/dev/null 2>&1 || true
+rm -rf "$HOME/.npm/_cacache"
+npm config set maxsockets 1 >/dev/null 2>&1 || true
+npm config set fetch-retries 5 >/dev/null 2>&1 || true
+NPM_FAIL=""
+for pk in chrome-devtools-mcp @playwright/mcp @upstash/context7-mcp \
+          lighthouse prettier html-validate serve ui-ux-pro-max-cli; do
+  done_ok=0
+  for try in 1 2 3; do
+    if npm install -g --no-audit --no-fund "$pk" >/dev/null 2>"$HOME/.npm-err.log"; then done_ok=1; break; fi
+    warn "$pk ล้มเหลว (ครั้งที่ $try) ล้าง cache แล้วลองใหม่..."
+    rm -rf "$HOME/.npm/_cacache"; sleep 2
+  done
+  if [ "$done_ok" = 1 ]; then ok "$pk"; else NPM_FAIL+=" $pk"; tail -5 "$HOME/.npm-err.log"; fi
+done
+[ -z "$NPM_FAIL" ] || warn "ติดตั้งไม่สำเร็จ:$NPM_FAIL  (รันสคริปต์นี้ซ้ำได้)"
 
 info "[6/8] สร้างคำสั่ง webdeploy / webcheck..."
 cat > /usr/local/bin/webdeploy <<'EOF'
@@ -233,11 +241,14 @@ ok "webdeploy, webcheck, ~/.deploy.env.example"
 
 info "[7/8] ติดตั้ง Skills..."
 mkdir -p "$HOME/.claude/skills"
-( cd "$HOME" && uipro init --ai claude --global ) || {
+if command -v uipro >/dev/null 2>&1 && ( cd "$HOME" && uipro init --ai claude --global ); then
+  ok "ui-ux-pro-max (uipro)"
+else
   warn "uipro ไม่สำเร็จ ใช้วิธีคัดลอกจาก GitHub แทน"
   T="$(mktemp -d)"; git clone -q --depth 1 https://github.com/nextlevelbuilder/ui-ux-pro-max-skill "$T/u" \
-    && cp -r "$T/u/.claude/skills/." "$HOME/.claude/skills/" || warn "ติดตั้ง ui-ux-pro-max ไม่ได้"
-}
+    && cp -r "$T/u/.claude/skills/." "$HOME/.claude/skills/" && ok "ui-ux-pro-max (GitHub)" \
+    || warn "ติดตั้ง ui-ux-pro-max ไม่ได้"
+fi
 T="$(mktemp -d)"
 if git clone -q --depth 1 --filter=blob:none --sparse https://github.com/anthropics/skills "$T/a" \
    && git -C "$T/a" sparse-checkout set skills/frontend-design skills/webapp-testing; then
@@ -301,7 +312,7 @@ if [ -n "$CLAUDE_BIN" ]; then
   done
   "$CLAUDE_BIN" mcp add -s user chrome-devtools -- /usr/local/bin/mcp-chrome-devtools
   "$CLAUDE_BIN" mcp add -s user playwright -- /usr/local/bin/mcp-playwright
-  "$CLAUDE_BIN" mcp add -s user context7 -- npx -y @upstash/context7-mcp@latest
+  "$CLAUDE_BIN" mcp add -s user context7 -- context7-mcp
 else
   warn "หา claude ไม่เจอ ข้ามการลงทะเบียน MCP"
 fi

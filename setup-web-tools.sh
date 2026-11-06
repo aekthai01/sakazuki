@@ -141,14 +141,17 @@ cat > /usr/local/bin/web-browser-up <<'EOF'
 #!/usr/bin/env bash
 # เปิด Chromium headless พร้อม remote debugging port 9222 (ถ้ายังไม่เปิด)
 # ห้ามพิมพ์อะไรออก stdout เพราะ MCP ใช้ stdout คุยกับ Claude
+# --no-startup-window: ไม่เปิดแท็บ about:blank ค้างไว้ข้างหน้า (ไม่งั้นแท็บของ playwright-mcp
+#   กลายเป็น hidden -> คลิกไม่ได้) และไม่กู้แท็บเก่ากลับมาทุกครั้งที่เปิดใหม่ (กิน RAM)
 PORT="${WEB_BROWSER_PORT:-9222}"
 curl -fs "http://127.0.0.1:$PORT/json/version" >/dev/null 2>&1 && exit 0
 mkdir -p "$HOME/.web-browser-profile"
+rm -rf "$HOME/.web-browser-profile/Default/Sessions"   # แท็บค้างจากรอบก่อน
 nohup /usr/local/bin/web-chrome --headless=new --no-sandbox --disable-gpu \
-  --disable-dev-shm-usage --no-first-run --no-default-browser-check \
+  --disable-dev-shm-usage --no-first-run --no-default-browser-check --no-startup-window \
   --remote-debugging-address=127.0.0.1 --remote-debugging-port="$PORT" \
   --user-data-dir="$HOME/.web-browser-profile" --window-size=1366,900 \
-  --lang=th-TH about:blank >"$HOME/.web-browser.log" 2>&1 &
+  --lang=th-TH >"$HOME/.web-browser.log" 2>&1 &
 for _ in $(seq 1 40); do
   curl -fs "http://127.0.0.1:$PORT/json/version" >/dev/null 2>&1 && exit 0
   sleep 0.5
@@ -191,7 +194,8 @@ set -a; . "$ENV_FILE"; set +a
 LOCAL_DIR="${LOCAL_DIR:-.}"
 DRY=""; [ "${1:-}" = "--dry-run" ] && DRY="--dry-run"
 EXCL=(.git/ node_modules/ .deploy.env .claude/ .DS_Store)
-for e in ${EXCLUDE:-}; do EXCL+=("$e"); done
+read -r -a EXTRA <<< "${EXCLUDE:-}"   # ไม่ให้ shell ขยาย *.log เป็นชื่อไฟล์
+EXCL+=("${EXTRA[@]}")
 
 case "$PROTOCOL" in
   ftp|ftps|sftp)
@@ -234,7 +238,7 @@ CHROME_PATH=/usr/local/bin/web-chrome lighthouse "$URL" --quiet --output=json --
   || { echo "Lighthouse รันไม่สำเร็จ"; exit 1; }
 node -e '
 const r=require(process.argv[1]);
-for (const [k,c] of Object.entries(r.categories)) console.log(`${c.title.padEnd(16)} ${Math.round(c.score*100)}`);
+for (const [k,c] of Object.entries(r.categories)) console.log(`${c.title.padEnd(16)} ${c.score==null?"-":Math.round(c.score*100)}`);
 const bad=Object.values(r.audits).filter(a=>a.score!==null&&a.score<0.5&&a.scoreDisplayMode!=="informative").slice(0,10);
 if(bad.length){console.log("\nปัญหาหลัก:");bad.forEach(a=>console.log(" - "+a.title+(a.displayValue?` (${a.displayValue})`:"")));}
 console.log("\nรายงานเต็ม: "+process.argv[1]);' "$OUT"
